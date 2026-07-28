@@ -49,7 +49,7 @@ POST_SCRIPT_MARKDOWN_OUTPUT_KEYS = frozenset({"_reserved_report", "_reserved_poc
 POST_SCRIPT_CHIP_PREFIX = "_chip_"
 WORKFLOW_FIELD_TYPES = ("string", "number", "boolean", "array", "object")
 POST_SCRIPT_FIELD_TYPES = WORKFLOW_FIELD_TYPES
-MODEL_PROVIDERS = frozenset({"codex", "claude", "openrouter"})
+MODEL_PROVIDERS = frozenset({"codex", "claude", "kimi", "openrouter"})
 THINKING_EFFORTS = frozenset({"default", "low", "medium", "high", "xhigh", "max", "ultra"})
 GENERATION_REQUEST_MAX_LENGTH = 20_000
 MODEL_ID_MAX_LENGTH = 200
@@ -61,6 +61,7 @@ UNSAFE_OBJECT_KEYS = frozenset({"__proto__", "constructor", "prototype"})
 MODEL_PROVIDER_HARNESSES = {
     "codex": frozenset({"codex"}),
     "claude": frozenset({"claude-code"}),
+    "kimi": frozenset({"claude-code"}),
     "openrouter": frozenset({"codex", "claude-code"}),
 }
 HARNESS_THINKING_EFFORTS = {
@@ -99,6 +100,7 @@ GENERATION_COMMON_ENV_KEYS = frozenset(
 GENERATION_PROVIDER_ENV_KEYS = {
     "codex": frozenset({"CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_HOME"}),
     "claude": frozenset({"ANTHROPIC_API_KEY"}),
+    "kimi": frozenset({"KIMI_API_KEY"}),
     "openrouter": frozenset({"OPENROUTER_API_KEY"}),
 }
 

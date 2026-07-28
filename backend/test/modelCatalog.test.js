@@ -186,6 +186,20 @@ test('cached model lookup identifies exact catalog entries', () => {
   assert.equal(isCachedModel('openrouter', 'any/provider-model', null), false);
 });
 
+test('the kimi provider serves its bounded static catalog without a cached refresh', () => {
+  const entry = buildModelCatalogResponse(['kimi'], []).providers[0];
+  assert.equal(entry.provider, 'kimi');
+  assert.equal(entry.input, 'select');
+  assert.equal(entry.status, 'ready');
+  assert.equal(entry.defaultModel, 'k3');
+  assert.deepEqual(
+    entry.models.map((model) => model.id),
+    ['k3', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed']
+  );
+  assert.equal(isCachedModel('kimi', 'k3', null), true);
+  assert.equal(isCachedModel('kimi', 'kimi-k2', null), false);
+});
+
 test('a last refresh error retains a previously valid cached catalog', () => {
   const catalog = {
     provider: 'codex',

@@ -159,12 +159,14 @@ OPENROUTER_MODEL_ALIASES = {
     "glm-5.2": "z-ai/glm-5.2",
     "grok-4.5": "x-ai/grok-4.5",
 }
+# Kimi Code's Anthropic-compatible plan endpoint (Claude Code appends /v1/messages).
+KIMI_CLAUDE_BASE_URL = "https://api.kimi.com/coding"
 CLAUDE_MODEL_ALIASES = {
     "opus-4.7": "claude-opus-4-7",
     "opus-4.8": "claude-opus-4-8",
 }
 DEFAULT_MODEL_PROVIDER = "openrouter"
-MODEL_PROVIDERS = {"codex", "claude", "openrouter"}
+MODEL_PROVIDERS = {"codex", "claude", "kimi", "openrouter"}
 CLAUDE_WORKSPACE_SYSTEM_PROMPT = (
     "Use only files under the current working directory and dependency paths listed in WORKSPACE.json. "
     "Do not search from filesystem root (/), /data, /root, /home, or other global paths. "
@@ -792,6 +794,7 @@ def _scan_docker_command(cmd: list[str], repo_dir: str, env: dict[str, str]) -> 
         "CODEX_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
+        "KIMI_API_KEY",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
@@ -885,14 +888,16 @@ def claude_model_provider(
     model: str, env: dict[str, str] | None = None, model_provider: str | None = None
 ) -> str | None:
     requested_provider = normalize_model_provider(model_provider)
-    if requested_provider == "openrouter":
-        return "openrouter"
+    if requested_provider in {"openrouter", "kimi"}:
+        return requested_provider
     if requested_provider:
         return None
     actual_env = env or os.environ
     provider = normalize_model_provider(
         actual_env.get("CLAUDE_CODE_MODEL_PROVIDER") or actual_env.get("CODEX_MODEL_PROVIDER")
     )
+    if provider == "kimi" and actual_env.get("KIMI_API_KEY"):
+        return "kimi"
     if provider == "openrouter" and actual_env.get("OPENROUTER_API_KEY"):
         return "openrouter"
     if actual_env.get("OPENROUTER_API_KEY") and (model in OPENROUTER_MODEL_ALIASES or "/" in model):
@@ -908,7 +913,7 @@ def _claude_model_name(model: str, env: dict[str, str], model_provider: str | No
 
 def _apply_claude_host_auth_home(env: dict[str, str], provider: str | None) -> dict[str, str]:
     auth_home = env.get("ENGINE_CLAUDE_AUTH_HOME") or os.getenv("ENGINE_CLAUDE_AUTH_HOME")
-    if provider == "openrouter" or not auth_home or _env_enabled("ENGINE_CLAUDE_DOCKER_RUNNER"):
+    if provider in {"openrouter", "kimi"} or not auth_home or _env_enabled("ENGINE_CLAUDE_DOCKER_RUNNER"):
         return env
     actual_env = dict(env)
     auth_home = str(Path(auth_home).expanduser())
@@ -927,11 +932,14 @@ def _apply_claude_host_auth_home(env: dict[str, str], provider: str | None) -> d
 
 def _claude_env(env: dict[str, str], model: str, model_provider: str | None = None) -> dict[str, str]:
     actual_env = dict(env)
-    if claude_model_provider(model, actual_env, model_provider) == "openrouter":
-        if not actual_env.get("OPENROUTER_API_KEY"):
-            raise HarnessError("OPENROUTER_API_KEY is required when model provider is openrouter")
-        actual_env["ANTHROPIC_BASE_URL"] = actual_env.get("ANTHROPIC_BASE_URL") or OPENROUTER_CLAUDE_BASE_URL
-        actual_env["ANTHROPIC_AUTH_TOKEN"] = actual_env.get("ANTHROPIC_AUTH_TOKEN") or actual_env["OPENROUTER_API_KEY"]
+    provider = claude_model_provider(model, actual_env, model_provider)
+    if provider in {"openrouter", "kimi"}:
+        key_name = "OPENROUTER_API_KEY" if provider == "openrouter" else "KIMI_API_KEY"
+        if not actual_env.get(key_name):
+            raise HarnessError(f"{key_name} is required when model provider is {provider}")
+        base_url = OPENROUTER_CLAUDE_BASE_URL if provider == "openrouter" else KIMI_CLAUDE_BASE_URL
+        actual_env["ANTHROPIC_BASE_URL"] = actual_env.get("ANTHROPIC_BASE_URL") or base_url
+        actual_env["ANTHROPIC_AUTH_TOKEN"] = actual_env.get("ANTHROPIC_AUTH_TOKEN") or actual_env[key_name]
         actual_env["ANTHROPIC_API_KEY"] = ""
     return actual_env
 
@@ -1586,6 +1594,9 @@ class ClaudeHarness:
     ) -> HarnessResult:
         base_env = env if env is not None else _base_env()
         provider = claude_model_provider(model, base_env, self.model_provider)
+        # Anthropic-compatible gateways (OpenRouter, Kimi) lack the native
+        # structured-output and OAuth surfaces Claude Code expects.
+        gateway = provider in ("openrouter", "kimi")
         actual_env = _claude_env(base_env, model, self.model_provider)
         actual_env = _apply_claude_host_auth_home(actual_env, provider)
         model = _claude_model_name(model, actual_env, self.model_provider)
@@ -1598,7 +1609,7 @@ class ClaudeHarness:
             "--input-format",
             "text",
             "--output-format",
-            "stream-json" if provider == "openrouter" else "json",
+            "stream-json" if gateway else "json",
             "--append-system-prompt",
             CLAUDE_WORKSPACE_SYSTEM_PROMPT if allow_tools else CLAUDE_GENERATION_SYSTEM_PROMPT,
         ]
@@ -1608,7 +1619,7 @@ class ClaudeHarness:
             # No tools, MCP configuration, or user/project settings are loaded for
             # untrusted generation requests. The response is schema-only text.
             cmd.extend(["--tools", "", "--permission-mode", "dontAsk", "--strict-mcp-config", "--setting-sources", ""])
-        if provider != "openrouter":
+        if not gateway:
             cmd.extend(["--json-schema", json.dumps(_claude_json_schema(schema))])
         else:
             cmd.extend(["--include-partial-messages", "--verbose"])
@@ -1616,14 +1627,14 @@ class ClaudeHarness:
             cmd.extend(["--effort", thinking_effort])
         run_cmd = _scan_docker_command(cmd, repo_dir, actual_env) if allow_tools else cmd
         timeout_seconds = self.timeout_seconds
-        if provider != "openrouter":
+        if not gateway:
             timeout_seconds = claude_oauth_timeout_seconds(
                 actual_env.get(CLAUDE_OAUTH_EXPIRY_ENV),
                 timeout_seconds,
             )
         proc = _run_process(run_cmd, prompt, repo_dir, timeout_seconds, env=actual_env)
         process_output = _process_output(proc)
-        if provider == "openrouter":
+        if gateway:
             try:
                 payload, usage = _extract_json_from_claude_stream(proc.stdout, provider=provider)
             except HarnessError as exc:

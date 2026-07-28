@@ -489,6 +489,11 @@ a {
   background: var(--run-bg);
 }
 
+.account-provider-mark-kimi {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+
 .account-status-badge,
 .account-kind {
   display: inline-flex;

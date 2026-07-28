@@ -1,10 +1,11 @@
-export const MODEL_PROVIDER_IDS = ['codex', 'claude', 'openrouter'];
+export const MODEL_PROVIDER_IDS = ['codex', 'claude', 'kimi', 'openrouter'];
 export const MODEL_CATALOG_STATUSES = ['ready', 'loading', 'unavailable'];
 const SAFE_MODEL_NOTE_URLS = new Set(['https://chatgpt.com/cyber']);
 
 const PROVIDER_HARNESSES = {
   codex: ['codex'],
   claude: ['claude-code'],
+  kimi: ['claude-code'],
   // Claude Code has first-class OpenRouter support. Codex remains available
   // for advanced installations with a matching Codex provider configuration.
   openrouter: ['claude-code', 'codex'],
@@ -13,12 +14,14 @@ const PROVIDER_HARNESSES = {
 const PROVIDER_DEFAULT_MODELS = {
   codex: 'gpt-5-codex',
   claude: 'claude-sonnet-5',
+  kimi: 'k3',
   openrouter: 'z-ai/glm-5.2',
 };
 
 const PROVIDER_THINKING_EFFORTS = {
   codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
+  kimi: ['default'],
   openrouter: ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
 };
 

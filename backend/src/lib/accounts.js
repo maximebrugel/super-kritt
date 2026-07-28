@@ -201,6 +201,20 @@ export function buildAccountsOverview(statuses, executorAccounts) {
     const accounts = Array.isArray(executorProvider?.accounts)
       ? executorProvider.accounts.map(safeAccount).filter(Boolean)
       : [];
+    // The executor does not track Kimi, so a configured key is shown as the
+    // provider's single account row instead of an empty "no data" state.
+    if (status.id === 'kimi' && status.configured && !accounts.length) {
+      accounts.push(
+        safeAccount({
+          id: 'default',
+          label: 'Kimi API key',
+          active: true,
+          canRemove: false,
+          status: 'Key configured',
+          statusKind: 'available',
+        })
+      );
+    }
     const hasActiveAccount = accounts.some((account) => account.active);
     const configured = status.configured || hasActiveAccount;
     return {
@@ -244,6 +258,7 @@ export async function getAccountProvider(providerId, { refresh = false, statusOp
     .providers[0];
   return {
     ...provider,
-    loadError: executorProvider ? null : 'Account status is unavailable.',
+    // Providers the executor does not track (e.g. kimi) have no account data to load.
+    loadError: executorProvider || !ACCOUNT_PROVIDER_IDS.includes(providerId) ? null : 'Account status is unavailable.',
   };
 }

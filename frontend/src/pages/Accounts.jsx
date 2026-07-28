@@ -7,6 +7,7 @@ import { usePageChrome } from '../context/ui.jsx';
 import { usePagination } from '../lib/usePagination.js';
 
 const PROVIDER_LINKS = {
+  kimi: 'https://www.kimi.com/code/console',
   openrouter: 'https://openrouter.ai/settings/keys',
 };
 
@@ -101,7 +102,7 @@ export default function Accounts() {
   };
 
   const remove = async (provider) => {
-    if (!window.confirm('Remove the OpenRouter API key from open·kritt?')) return;
+    if (!window.confirm(`Remove the ${provider.label} API key from open·kritt?`)) return;
     const previous = data;
     setData(removeProviderFromOverview(data, provider.id));
     try {
@@ -118,7 +119,7 @@ export default function Accounts() {
     const impact =
       provider.id === 'codex'
         ? 'This signs Codex out locally and removes its managed account home when applicable. Existing scans and results are kept.'
-        : 'This signs Claude out locally. Existing scans and results are kept.';
+        : `This signs ${provider.label} out locally. Existing scans and results are kept.`;
     if (!window.confirm(`Remove ${label}?\n\n${impact}`)) return;
     const key = `${provider.id}:${account.id}`;
     const previous = data;
@@ -168,8 +169,8 @@ export default function Accounts() {
         <div>
           <div style={{ fontSize: 27, fontWeight: 600, letterSpacing: '-0.02em' }}>Accounts</div>
           <div style={{ color: 'var(--text-2)', marginTop: 7, maxWidth: 680, lineHeight: 1.5 }}>
-            See which model providers are ready. Sign in to Codex or Claude with their official login flows, or add an
-            OpenRouter API key. Secret values are never returned by the API.
+            See which model providers are ready. Sign in to Codex or Claude with their official login flows, or add a
+            Kimi or OpenRouter API key. Secret values are never returned by the API.
           </div>
         </div>
         {data && (
@@ -351,11 +352,11 @@ function ProviderCard({
 }
 
 export function providerActionLabel(provider) {
-  if (provider.management !== 'login') return provider.configured ? 'Add or replace key' : 'Add OpenRouter key';
+  if (provider.management !== 'login') return provider.configured ? 'Add or replace key' : `Add ${provider.label} key`;
   const signInRequired = provider.accounts.some((account) => account.statusKind === 'expired');
   if (provider.id === 'codex') return signInRequired ? 'Sign in to Codex again' : 'Add Codex account';
-  if (signInRequired) return 'Sign in to Claude again';
-  return provider.configured ? 'Reconnect Claude' : 'Sign in to Claude';
+  if (signInRequired) return `Sign in to ${provider.label} again`;
+  return provider.configured ? `Reconnect ${provider.label}` : `Sign in to ${provider.label}`;
 }
 
 export function providerReloginAccountId(provider) {
@@ -420,7 +421,7 @@ export function removeProviderFromOverview(overview, providerId) {
 }
 
 function ProviderMark({ provider }) {
-  const label = provider === 'codex' ? 'CX' : provider === 'claude' ? 'CL' : 'OR';
+  const label = { codex: 'CX', claude: 'CL', kimi: 'KM' }[provider] || 'OR';
   return <span className={`mono account-provider-mark account-provider-mark-${provider}`}>{label}</span>;
 }
 
@@ -844,7 +845,7 @@ function LoginDialog({ provider, onClose, onComplete }) {
                 ? `Sign in to ${provider.label} again`
                 : provider.id === 'codex'
                   ? 'Add Codex account'
-                  : 'Sign in to Claude'}
+                  : `Sign in to ${provider.label}`}
             </div>
           </div>
           <button className="account-dialog-close" type="button" aria-label="Close" onClick={cancel}>

@@ -20,6 +20,7 @@ export const THINKING_EFFORTS = ['default', 'low', 'medium', 'high', 'xhigh', 'm
 const PROVIDER_LABELS = {
   codex: 'Codex',
   claude: 'Claude',
+  kimi: 'Kimi',
   openrouter: 'OpenRouter',
 };
 

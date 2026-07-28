@@ -36,6 +36,16 @@ const CLAUDE_CODE_MODELS = [
   },
 ];
 
+// Bounded list of the Kimi plan coding models (api.kimi.com/coding/v1/models),
+// maintained here like the Claude subscription list. They are thinking-only
+// models without an effort selector.
+const KIMI_MODELS = [
+  { id: 'k3', label: 'K3', thinkingEfforts: ['default'], isDefault: true },
+  { id: 'k3-256k', label: 'K3 256k', thinkingEfforts: ['default'], isDefault: false },
+  { id: 'kimi-for-coding', label: 'K2.7 Coding', thinkingEfforts: ['default'], isDefault: false },
+  { id: 'kimi-for-coding-highspeed', label: 'K2.7 Coding Highspeed', thinkingEfforts: ['default'], isDefault: false },
+];
+
 function normalizedProvider(provider) {
   return `${provider || ''}`.trim().toLowerCase();
 }
@@ -98,6 +108,10 @@ export function modelCatalogEntry(provider, catalog) {
 
   if (provider === 'openrouter') {
     return { provider, input: 'text', models: [], defaultModel: null, status: 'ready' };
+  }
+
+  if (provider === 'kimi') {
+    return { provider, input: 'select', models: KIMI_MODELS, defaultModel: 'k3', status: 'ready' };
   }
 
   // Subscription logins authenticate Claude Code but cannot call Anthropic's

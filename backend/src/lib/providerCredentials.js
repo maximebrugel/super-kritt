@@ -24,6 +24,13 @@ export const PROVIDER_DEFINITIONS = {
     description: 'Claude subscription account authenticated through Claude Code.',
     management: 'login',
   },
+  kimi: {
+    label: 'Kimi',
+    envKeys: ['KIMI_API_KEY'],
+    credentialLabel: 'Kimi API key',
+    description: 'Kimi plan coding models (K3) through a Kimi Code console API key.',
+    management: 'api_key',
+  },
   openrouter: {
     label: 'OpenRouter',
     envKeys: ['OPENROUTER_API_KEY'],
@@ -33,7 +40,9 @@ export const PROVIDER_DEFINITIONS = {
   },
 };
 
-const MANAGED_CREDENTIAL_PROVIDERS = new Set(['openrouter']);
+const MANAGED_CREDENTIAL_PROVIDERS = new Set(
+  Object.keys(PROVIDER_DEFINITIONS).filter((id) => PROVIDER_DEFINITIONS[id].management === 'api_key')
+);
 
 const MAX_CREDENTIAL_LENGTH = 16 * 1024;
 let writeQueue = Promise.resolve();
@@ -107,7 +116,7 @@ function queuedWrite(operation) {
 
 export function validateProviderCredential(provider, credential) {
   if (!MANAGED_CREDENTIAL_PROVIDERS.has(provider)) {
-    return { field: 'provider', message: 'Only OpenRouter uses an API key in Accounts.' };
+    return { field: 'provider', message: 'Only API-key providers accept a key in Accounts.' };
   }
   if (typeof credential !== 'string' || !credential.trim()) {
     return { field: 'credential', message: 'Enter an API key.' };
@@ -215,8 +224,8 @@ export function providerCredentialStatuses({
       management: definition.management,
       configured,
       source,
-      canManage: definition.management === 'login' || id === 'openrouter',
-      canRemove: id === 'openrouter' && (managedCredential || environmentCredential),
+      canManage: definition.management === 'login' || definition.management === 'api_key',
+      canRemove: definition.management === 'api_key' && (managedCredential || environmentCredential),
       managed: managedCredential,
     };
   });

@@ -87,6 +87,7 @@ describe('expired Claude login', () => {
     );
     const provider = {
       id: 'claude',
+      label: 'Claude',
       management: 'login',
       configured: true,
       accounts: [{ id: 'default', statusKind: 'expired' }],

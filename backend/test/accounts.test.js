@@ -1,7 +1,28 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { consumeCodexManualReset, fetchExecutorAccounts } from '../src/lib/accounts.js';
+import { buildAccountsOverview, consumeCodexManualReset, fetchExecutorAccounts } from '../src/lib/accounts.js';
+
+test('a configured Kimi key appears as the provider account row without executor data', () => {
+  const status = { id: 'kimi', label: 'Kimi', configured: true, management: 'api_key', source: 'managed_api_key' };
+  const provider = buildAccountsOverview([status], null).providers[0];
+
+  assert.equal(provider.configured, true);
+  assert.equal(provider.active, 1);
+  assert.deepEqual(
+    provider.accounts.map(({ id, label, active, status: accountStatus, statusKind }) => ({
+      id,
+      label,
+      active,
+      status: accountStatus,
+      statusKind,
+    })),
+    [{ id: 'default', label: 'Kimi API key', active: true, status: 'Key configured', statusKind: 'available' }]
+  );
+
+  const unconfigured = buildAccountsOverview([{ ...status, configured: false, source: null }], null).providers[0];
+  assert.equal(unconfigured.accounts.length, 0);
+});
 
 test('executor account integration loads each provider independently with the distinct internal bearer token', async (t) => {
   const originalFetch = globalThis.fetch;

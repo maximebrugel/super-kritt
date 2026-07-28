@@ -7,6 +7,7 @@ from pathlib import Path
 
 DEFAULT_PROVIDER_CREDENTIALS_PATH = "/credentials/providers.json"
 PROVIDER_ENV_KEYS = {
+    "kimi": "KIMI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
 }
 MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024
@@ -36,6 +37,7 @@ JOB_COMMON_ENV_KEYS = frozenset(
 JOB_PROVIDER_ENV_KEYS = {
     "codex": frozenset({"CODEX_API_KEY", "OPENAI_API_KEY"}),
     "claude": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}),
+    "kimi": frozenset({"KIMI_API_KEY"}),
     "openrouter": frozenset({"OPENROUTER_API_KEY"}),
 }
 JOB_HARNESS_ENV_KEYS = {

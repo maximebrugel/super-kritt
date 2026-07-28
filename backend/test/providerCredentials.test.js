@@ -38,9 +38,11 @@ test('managed credentials are saved privately without appearing in status', asyn
     OPENROUTER_API_KEY: 'openrouter-secret',
   });
 
-  const [codex, claude, openrouter] = providerCredentialStatuses({ env: {}, credentialsPath });
+  const [codex, claude, kimi, openrouter] = providerCredentialStatuses({ env: {}, credentialsPath });
   assert.equal(codex.configured, false);
   assert.equal(claude.configured, false);
+  assert.equal(kimi.configured, false);
+  assert.equal(kimi.management, 'api_key');
   assert.equal(openrouter.source, 'managed_api_key');
   assert.equal(JSON.stringify(openrouter).includes('openrouter-secret'), false);
 });

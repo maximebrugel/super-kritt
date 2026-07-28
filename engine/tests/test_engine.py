@@ -1215,6 +1215,61 @@ def test_claude_harness_can_route_glm_through_openrouter(monkeypatch, tmp_path):
     assert harnesses.claude_model_provider("glm-5.2", captured["env"]) == "openrouter"
 
 
+def test_claude_harness_routes_kimi_through_anthropic_compatible_endpoint(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_process(cmd, prompt, cwd, timeout, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        payload = marked({"stub": True, "stub_explanation": "No matching records.", "results": []})
+        return SimpleNamespace(
+            stdout="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "result": json.dumps(payload),
+                            "usage": {"input_tokens": 1},
+                        }
+                    ),
+                ]
+            ),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr(harnesses, "_run_process", fake_run_process)
+
+    result = ClaudeHarness(timeout_seconds=5, model_provider="kimi").run(
+        prompt="prompt",
+        schema=output_schema('{"thing":"string"}', multi_output=False),
+        repo_dir="/tmp",
+        model="k3",
+        thinking_effort="default",
+        env={
+            "HOME": str(tmp_path / "home"),
+            "CLAUDE_HOME": str(tmp_path / "home" / ".claude"),
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "home" / ".claude"),
+            "KIMI_API_KEY": "kimi-key",
+        },
+    )
+
+    assert result.payload == marked({"stub": True, "stub_explanation": "No matching records.", "results": []})
+    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "k3"
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://api.kimi.com/coding"
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "kimi-key"
+    assert captured["env"]["ANTHROPIC_API_KEY"] == ""
+    assert not any("kimi-key" in part for part in captured["cmd"])
+    assert captured["cmd"][captured["cmd"].index("--output-format") + 1] == "stream-json"
+    assert "--json-schema" not in captured["cmd"]
+    assert harnesses.claude_model_provider("k3", captured["env"], "kimi") == "kimi"
+
+
+def test_claude_kimi_requires_api_key():
+    with pytest.raises(HarnessError):
+        harnesses._claude_env({}, "k3", "kimi")
+
+
 def test_claude_openrouter_parse_error_carries_raw_output(monkeypatch, tmp_path):
     raw_stdout = "\n".join(
         [
