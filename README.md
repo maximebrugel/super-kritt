@@ -25,6 +25,11 @@ into de-duplicated, ranked findings with configurable validation and enrichment.
 
 </div>
 
+> [!NOTE]
+> This repository is a fork of [open·kritt](https://github.com/Kritt-ai/open-kritt)
+> with custom changes maintained at
+> [maximebrugel/super-kritt](https://github.com/maximebrugel/super-kritt).
+
 ![open·kritt workflow builder](assets/workflow_screen.png)
 
 ## What is open·kritt?

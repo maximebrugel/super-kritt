@@ -63,6 +63,9 @@ postgres_data/
 *.tar.gz
 *.tgz
 
+# Locally generated scan/audit reports (never commit)
+*-audit-report.pdf
+
 # Scratch files / notes (never commit)
 random.md
 z.json
