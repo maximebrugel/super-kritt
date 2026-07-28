@@ -1,9 +1,8 @@
 name: CI
 
-# Runs on pull requests targeting main. Making this a required status check in
-# branch protection (see RELEASE.md) is what prevents merging/pushing to main until
-# CI is green.
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
