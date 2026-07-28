@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.0](https://github.com/maximebrugel/super-kritt/compare/v1.1.0...v1.2.0) (2026-07-28)
+
+
+### Features
+
+* add Kimi model provider support ([cd6e3e2](https://github.com/maximebrugel/super-kritt/commit/cd6e3e287e5ceded374aaef2f0fb118260f49b4d))
+* added malicious actor in findings view ([7bc3dbc](https://github.com/maximebrugel/super-kritt/commit/7bc3dbc1656113db3c3e41ce79e27015a3f928ed))
+* changed resource_exhaustion to _chip_resource_exhaustion ([7015525](https://github.com/maximebrugel/super-kritt/commit/7015525aa6832bc660c050017e3750aa068c11b3))
+* changed resource_exhaustion to _chip_resource_exhaustion ([be89c98](https://github.com/maximebrugel/super-kritt/commit/be89c9883d827191e70710f0de897e30e5722140))
+* first open-source commit ([f0c939d](https://github.com/maximebrugel/super-kritt/commit/f0c939de7e83a22a4606431c702eb9be75491694))
+
 ## [1.1.0](https://github.com/Kritt-ai/open-kritt/compare/v1.0.0...v1.1.0) (2026-07-20)
 
 
