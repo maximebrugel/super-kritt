@@ -404,11 +404,15 @@ test('validateScan enforces model provider and harness compatibility after norma
   assert.equal(validateScan({ ...base, model_provider: 'claude', harness: 'claude-code' }).modelProvider, 'claude');
   assert.equal(validateScan({ ...base, model_provider: 'openrouter', harness: 'codex' }).harness, 'codex');
   assert.equal(validateScan({ ...base, model_provider: 'openrouter', harness: 'claude-code' }).harness, 'claude-code');
+  const kimiCode = validateScan({ ...base, model_provider: 'kimi', harness: 'kimi-code', thinking_effort: 'default' });
+  assert.equal(kimiCode.harness, 'kimi-code');
+  assert.equal(kimiCode.thinkingEffort, 'default');
 
   for (const [model_provider, harness] of [
     ['codex', 'claude-code'],
     ['claude', 'codex'],
     ['openrouter', 'cursor'],
+    ['openrouter', 'kimi-code'],
   ]) {
     assert.throws(
       () => validateScan({ ...base, model_provider, harness }),

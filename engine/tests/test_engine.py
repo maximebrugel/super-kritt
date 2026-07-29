@@ -20,6 +20,7 @@ from open_kritt_engine.harnesses import (
     HarnessError,
     HarnessOutput,
     HarnessResult,
+    KimiCodeHarness,
 )
 from open_kritt_engine.models import Job, State, Step, StepResultRow, Workflow
 from open_kritt_engine.post_processing import (
@@ -1394,6 +1395,87 @@ def test_cursor_harness_routes_grok_openrouter_headless(monkeypatch, tmp_path):
 def test_cursor_harness_aliases():
     assert harnesses.normalize_harness_name("cursor-cli") == "cursor"
     assert harnesses.normalize_harness_name("cursor-agent") == "cursor"
+
+
+def test_kimi_code_harness_runs_headless_stream_json(monkeypatch, tmp_path):
+    captured = {}
+    payload = marked({"results": [{"thing": "kimi"}]})
+
+    def fake_run_process(cmd, prompt, cwd, timeout, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        stdout = "\n".join(
+            [
+                json.dumps({"role": "assistant", "tool_calls": [{"type": "function"}]}),
+                json.dumps({"role": "tool", "content": "1\tmagic-word: pineapple"}),
+                json.dumps({"role": "assistant", "content": json.dumps(payload)}),
+                json.dumps({"role": "meta", "type": "session.resume_hint", "session_id": "session_x"}),
+            ]
+        )
+        return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+    monkeypatch.setattr(harnesses, "_run_process", fake_run_process)
+
+    result = KimiCodeHarness(timeout_seconds=5, model_provider="kimi").run(
+        prompt="prompt",
+        schema=output_schema('{"thing":"string"}', multi_output=False),
+        repo_dir=str(tmp_path),
+        model="k3",
+        env={"HOME": str(tmp_path / "home"), "KIMI_API_KEY": "kimi-key", "PATH": "/nonexistent"},
+    )
+
+    assert result.payload == payload
+    assert captured["cmd"][0].endswith("kimi")
+    assert captured["cmd"][1:3] == ["-p", "prompt"]
+    assert captured["cmd"][captured["cmd"].index("--output-format") + 1] == "stream-json"
+    assert captured["cmd"][captured["cmd"].index("-m") + 1] == "kimi-code/k3"
+    assert "kimi-key" not in " ".join(captured["cmd"])
+    assert captured["env"]["KIMI_API_KEY"] == "kimi-key"
+    assert captured["env"]["KIMI_CLI_NO_AUTO_UPDATE"] == "1"
+    assert isinstance(
+        harnesses.harness_for("kimi-code", timeout_seconds=5, model_provider="kimi"), KimiCodeHarness
+    )
+
+
+def test_kimi_code_harness_requires_api_key(tmp_path):
+    with pytest.raises(HarnessError) as raised:
+        KimiCodeHarness(timeout_seconds=5, model_provider="kimi").run(
+            prompt="prompt",
+            schema=output_schema('{"thing":"string"}', multi_output=False),
+            repo_dir=str(tmp_path),
+            model="k3",
+            env={"HOME": str(tmp_path / "home")},
+        )
+    assert raised.value.code == "configuration_error"
+
+
+def test_kimi_code_generation_writes_temp_secret_free_config(monkeypatch, tmp_path):
+    captured = {}
+    payload = marked({"results": []})
+
+    def fake_run_process(cmd, prompt, cwd, timeout, env=None):
+        captured["config"] = (Path(env["KIMI_CODE_HOME"]) / "config.toml").read_text(encoding="utf-8")
+        return SimpleNamespace(
+            stdout=json.dumps({"role": "assistant", "content": json.dumps(payload)}),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr(harnesses, "_run_process", fake_run_process)
+
+    result = KimiCodeHarness(timeout_seconds=5, model_provider="kimi").run(
+        prompt="prompt",
+        schema=output_schema('{"thing":"string"}', multi_output=False),
+        repo_dir=str(tmp_path),
+        model="k3",
+        env={"HOME": str(tmp_path / "home"), "KIMI_API_KEY": "kimi-key", "PATH": "/nonexistent"},
+        allow_tools=False,
+    )
+
+    assert result.payload == payload
+    assert 'default_model = "kimi-code/k3"' in captured["config"]
+    assert '[models."kimi-code/k3-256k"]' in captured["config"]
+    assert "kimi-key" not in captured["config"]
 
 
 def test_tool_harness_docker_runner_is_root_writable_and_internet_enabled(monkeypatch, tmp_path):

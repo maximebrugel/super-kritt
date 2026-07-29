@@ -3,12 +3,14 @@ const DIAGNOSTIC_SUFFIX_RE = /\s*Diagnostic:\s*([a-z0-9_-]+)\s*\(generation\s+(\
 const PROVIDER_LABELS = {
   codex: 'Codex',
   claude: 'Claude',
+  kimi: 'Kimi',
   openrouter: 'OpenRouter',
 };
 
 const HARNESS_LABELS = {
   codex: 'Codex CLI',
   'claude-code': 'Claude Code',
+  'kimi-code': 'Kimi Code',
 };
 
 function text(value) {

@@ -9,9 +9,13 @@ For full documentation, setup instructions, and project details, see the
 
 ## Custom features in super-kritt
 
-- **Kimi (Moonshot AI) model provider** — Kimi models can be used across the
-  backend, engine, and frontend model configuration. Set `KIMI_API_KEY` in
-  `.env` or add the key from the Accounts page.
+- **Kimi (Moonshot AI) model provider** — Kimi plan models (K3, K3-256k,
+  K2.7 Coding) can be selected in scans and AI generation. Set `KIMI_API_KEY`
+  (from the [Kimi Code console](https://www.kimi.com/code/console)) in `.env`
+  or add the key from the Accounts page.
+- **Two Kimi harnesses** — Kimi runs through Claude Code rerouted to Kimi's
+  Anthropic-compatible endpoint (default), or natively through the Kimi Code
+  CLI by picking the `kimi-code` harness in the model configuration.
 
 ## License
 

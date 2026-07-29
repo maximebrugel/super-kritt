@@ -74,7 +74,7 @@ export const DEFAULT_THINKING_EFFORT = 'medium';
 export const MODEL_PROVIDERS = ['codex', 'claude', 'kimi', 'openrouter'];
 export const DEFAULT_MODEL_PROVIDER = 'openrouter';
 
-export const HARNESSES = ['codex', 'claude-code', 'cursor'];
+export const HARNESSES = ['codex', 'claude-code', 'cursor', 'kimi-code'];
 export const HARNESS_ALIASES = {
   'codex-cli': 'codex',
   'cursor-agent': 'cursor',
@@ -83,12 +83,13 @@ export const HARNESS_ALIASES = {
 export const MODEL_PROVIDER_HARNESSES = {
   codex: ['codex'],
   claude: ['claude-code'],
-  kimi: ['claude-code'],
+  kimi: ['claude-code', 'kimi-code'],
   openrouter: ['codex', 'claude-code'],
 };
 export const HARNESS_THINKING_EFFORTS = {
   codex: ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   'claude-code': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'kimi-code': ['default'],
 };
 
 export const GENERATION_KINDS = ['workflow', 'post_script'];

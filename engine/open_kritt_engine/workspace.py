@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .claude_auth import CLAUDE_OAUTH_EXPIRY_ENV, prepare_claude_job_credentials
+from .harnesses import _write_kimi_code_home
 from .provider_credentials import job_environment
 from .repository import (
     LOCAL_SNAPSHOT_REVISION,
@@ -104,6 +105,7 @@ def prepare_job_workspace(
     claude_oauth_expires_at_ms = None
     needs_codex_home = selected_harness == "codex"
     needs_claude_home = selected_harness == "claude-code"
+    needs_kimi_home = selected_harness == "kimi-code"
     codex_source = (
         provider_home_for_job("codex", metadata_id, data_dir=data_dir)
         if needs_codex_home and selected_provider == "codex"
@@ -130,6 +132,9 @@ def prepare_job_workspace(
         # OpenRouter uses an API key and must not inherit Anthropic OAuth,
         # project settings, hooks, or MCP servers from the operator's profile.
         _prepare_claude_config(claude_home)
+    if needs_kimi_home:
+        # Secret-free config: the CLI reads KIMI_API_KEY from the job environment.
+        _write_kimi_code_home(home / ".kimi-code")
     if needs_codex_home:
         _install_agent_skills(codex_home, agent_skills or [])
     if needs_claude_home:
@@ -142,6 +147,7 @@ def prepare_job_workspace(
             "CODEX_HOME": str(codex_home),
             "CLAUDE_HOME": str(claude_home),
             "CLAUDE_CONFIG_DIR": str(claude_home),
+            "KIMI_CODE_HOME": str(home / ".kimi-code"),
             "XDG_CONFIG_HOME": str(home / ".config"),
             "XDG_CACHE_HOME": str(home / ".cache"),
             "XDG_DATA_HOME": str(home / ".local" / "share"),

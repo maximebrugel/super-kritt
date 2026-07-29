@@ -161,6 +161,19 @@ OPENROUTER_MODEL_ALIASES = {
 }
 # Kimi Code's Anthropic-compatible plan endpoint (Claude Code appends /v1/messages).
 KIMI_CLAUDE_BASE_URL = "https://api.kimi.com/coding"
+# The Kimi Code CLI's own endpoint, plus the per-model context sizes its
+# config.toml must declare for each selectable catalog model.
+KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1"
+KIMI_CODE_MODEL_CONTEXT_SIZES = {
+    "k3": 1048576,
+    "k3-256k": 262144,
+    "kimi-for-coding": 262144,
+    "kimi-for-coding-highspeed": 262144,
+}
+# ponytail: `kimi -p` only accepts the prompt as a single argv string (no stdin
+# mode), and Linux caps one argv entry at 128KiB. Fail clearly below the limit;
+# split the workflow step if this is ever hit.
+KIMI_CODE_PROMPT_ARG_LIMIT = 120_000
 CLAUDE_MODEL_ALIASES = {
     "opus-4.7": "claude-opus-4-7",
     "opus-4.8": "claude-opus-4-8",
@@ -780,6 +793,8 @@ def _scan_docker_command(cmd: list[str], repo_dir: str, env: dict[str, str]) -> 
         "CODEX_HOME": f"{CLAUDE_RUNNER_HOME}/.codex",
         "CLAUDE_HOME": f"{CLAUDE_RUNNER_HOME}/.claude",
         "CLAUDE_CONFIG_DIR": f"{CLAUDE_RUNNER_HOME}/.claude",
+        "KIMI_CODE_HOME": f"{CLAUDE_RUNNER_HOME}/.kimi-code",
+        "KIMI_CLI_NO_AUTO_UPDATE": "1",
         "XDG_CONFIG_HOME": f"{CLAUDE_RUNNER_HOME}/.config",
         "XDG_CACHE_HOME": f"{CLAUDE_RUNNER_HOME}/.cache",
         "XDG_DATA_HOME": f"{CLAUDE_RUNNER_HOME}/.local/share",
@@ -1165,6 +1180,30 @@ def _extract_json_from_cursor_json(stdout: str) -> tuple[dict[str, Any], dict[st
         if last_error is exc:
             raise
         raise last_error from exc
+
+
+def _extract_json_from_kimi_stream(stdout: str) -> dict[str, Any]:
+    candidates: list[str] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("role") == "assistant" and isinstance(event.get("content"), str) and event["content"]:
+            candidates.append(event["content"])
+    last_error = None
+    for candidate in reversed(candidates):
+        try:
+            return _parse_json_text(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    raise HarnessError(
+        "Kimi Code did not return a usable structured response.",
+        code="invalid_output",
+        harness="kimi-code",
+    ) from last_error
 
 
 def _usage_from_codex_jsonl(stdout: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -1771,6 +1810,104 @@ class CursorHarness:
         return HarnessResult(payload=payload, usage=usage, output=process_output)
 
 
+def _write_kimi_code_home(home: Path) -> None:
+    """Write a secret-free Kimi Code config; the CLI reads KIMI_API_KEY from the environment."""
+
+    lines = [
+        "telemetry = false",
+        'default_model = "kimi-code/k3"',
+        "",
+        '[providers."managed:kimi-code"]',
+        'type = "kimi"',
+        'api_key = ""',
+        f'base_url = "{KIMI_CODE_BASE_URL}"',
+    ]
+    for model_id, context_size in KIMI_CODE_MODEL_CONTEXT_SIZES.items():
+        lines += [
+            "",
+            f'[models."kimi-code/{model_id}"]',
+            'provider = "managed:kimi-code"',
+            f'model = "{model_id}"',
+            f"max_context_size = {context_size}",
+            'capabilities = [ "thinking", "always_thinking", "tool_use" ]',
+        ]
+    home.mkdir(parents=True, exist_ok=True)
+    config = home / "config.toml"
+    config.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    config.chmod(0o600)
+
+
+class KimiCodeHarness:
+    name = "kimi-code"
+
+    def __init__(self, timeout_seconds: int, model_provider: str | None = None):
+        self.timeout_seconds = timeout_seconds
+        self.model_provider = model_provider
+
+    def run(
+        self,
+        *,
+        prompt: str,
+        schema: dict[str, Any],
+        repo_dir: str,
+        model: str,
+        thinking_effort: str | None = None,
+        env: dict[str, str] | None = None,
+        allow_tools: bool = True,
+    ) -> HarnessResult:
+        actual_env = dict(env or _base_env())
+        if not actual_env.get("KIMI_API_KEY"):
+            raise HarnessError(
+                "KIMI_API_KEY is required when the harness is kimi-code.",
+                code="configuration_error",
+                harness="kimi-code",
+            )
+        if len(prompt.encode("utf-8")) > KIMI_CODE_PROMPT_ARG_LIMIT:
+            raise HarnessError(
+                "The prompt is too large for the Kimi Code CLI's single-argument limit.",
+                code="configuration_error",
+                harness="kimi-code",
+            )
+        actual_env.setdefault("KIMI_CLI_NO_AUTO_UPDATE", "1")
+        if allow_tools:
+            cleanup_home = None
+        else:
+            # Tool-free generation runs in the engine container without a job
+            # workspace, so the config home is a throwaway temp directory.
+            cleanup_home = tempfile.mkdtemp(prefix="kimi-code-home-")
+            _write_kimi_code_home(Path(cleanup_home))
+            actual_env["KIMI_CODE_HOME"] = cleanup_home
+        try:
+            executable = shutil.which("kimi", path=actual_env.get("PATH")) or "kimi"
+            cmd = [
+                executable,
+                "-p",
+                prompt,
+                "--output-format",
+                "stream-json",
+                "-m",
+                f"kimi-code/{model}",
+            ]
+            if allow_tools:
+                cmd = _scan_docker_command(cmd, repo_dir, actual_env)
+            proc = _run_process(cmd, "", repo_dir, self.timeout_seconds, env=actual_env)
+        finally:
+            if cleanup_home:
+                shutil.rmtree(cleanup_home, ignore_errors=True)
+        process_output = _process_output(proc)
+        try:
+            payload = _extract_json_from_kimi_stream(proc.stdout)
+        except (HarnessError, json.JSONDecodeError) as exc:
+            raise HarnessError(
+                "Kimi Code did not return a usable structured response.",
+                output=process_output,
+                code="invalid_output",
+                harness="kimi-code",
+            ) from exc
+        usage = {"thinking_effort": thinking_effort} if thinking_effort else None
+        return HarnessResult(payload=payload, usage=usage, output=process_output)
+
+
 def normalize_harness_name(name: str) -> str:
     if name == "codex-cli":
         return "codex"
@@ -1800,4 +1937,6 @@ def harness_for(
         return ClaudeHarness(timeout_seconds, provider)
     if normalized == "cursor":
         return CursorHarness(timeout_seconds, provider)
+    if normalized == "kimi-code":
+        return KimiCodeHarness(timeout_seconds, provider)
     raise HarnessError(f"unsupported harness {name!r}")

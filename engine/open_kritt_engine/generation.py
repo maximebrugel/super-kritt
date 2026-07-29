@@ -61,12 +61,13 @@ UNSAFE_OBJECT_KEYS = frozenset({"__proto__", "constructor", "prototype"})
 MODEL_PROVIDER_HARNESSES = {
     "codex": frozenset({"codex"}),
     "claude": frozenset({"claude-code"}),
-    "kimi": frozenset({"claude-code"}),
+    "kimi": frozenset({"claude-code", "kimi-code"}),
     "openrouter": frozenset({"codex", "claude-code"}),
 }
 HARNESS_THINKING_EFFORTS = {
     "codex": frozenset({"default", "low", "medium", "high", "xhigh", "max", "ultra"}),
     "claude-code": frozenset({"default", "low", "medium", "high", "xhigh", "max"}),
+    "kimi-code": frozenset({"default"}),
 }
 
 IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")

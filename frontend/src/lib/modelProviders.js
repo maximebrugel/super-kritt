@@ -5,7 +5,7 @@ const SAFE_MODEL_NOTE_URLS = new Set(['https://chatgpt.com/cyber']);
 const PROVIDER_HARNESSES = {
   codex: ['codex'],
   claude: ['claude-code'],
-  kimi: ['claude-code'],
+  kimi: ['claude-code', 'kimi-code'],
   // Claude Code has first-class OpenRouter support. Codex remains available
   // for advanced installations with a matching Codex provider configuration.
   openrouter: ['claude-code', 'codex'],
@@ -28,6 +28,7 @@ const PROVIDER_THINKING_EFFORTS = {
 const HARNESS_THINKING_EFFORTS = {
   codex: ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   'claude-code': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'kimi-code': ['default'],
 };
 
 function normalizedProviderId(provider) {

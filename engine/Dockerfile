@@ -14,6 +14,7 @@ RUN apt-get update \
     && npm install --global --no-audit --no-fund npm@12.0.1 \
     && npm install --global --no-audit --no-fund @openai/codex@0.144.6 \
     && npm install --global --no-audit --no-fund --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.215 \
+    && npm install --global --no-audit --no-fund --allow-scripts=@moonshot-ai/kimi-code @moonshot-ai/kimi-code@0.30.0 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

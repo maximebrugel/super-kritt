@@ -214,6 +214,11 @@ describe('model provider harnesses', () => {
     expect(defaultHarnessForModelProvider('openrouter')).toBe('claude-code');
   });
 
+  it('defaults Kimi to Claude Code and offers Kimi Code as a second choice', () => {
+    expect(harnessesForModelProvider('kimi')).toEqual(['claude-code', 'kimi-code']);
+    expect(defaultHarnessForModelProvider('kimi')).toBe('claude-code');
+  });
+
   it('returns no harness for an unsupported provider', () => {
     expect(harnessesForModelProvider('unknown')).toEqual([]);
     expect(defaultHarnessForModelProvider('unknown')).toBe('');
