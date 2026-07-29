@@ -30,29 +30,52 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
+// The step rows a validated workflow persists, in creation order.
+export function workflowStepRows(valid) {
+  return valid.levels.flatMap((level) => {
+    const isLast = level.depth === valid.maxDepth;
+    const outputFormatText = JSON.stringify(level.outputFormat);
+    return level.steps.map((step) => ({
+      content: step.content,
+      outputFormat: outputFormatText,
+      name: step.name?.trim() || null,
+      depth: level.depth,
+      multiOutput: level.multiOutput,
+      consumesAll: level.consumesAll,
+      isLastStep: isLast,
+      outputTable: isLast ? VULNERABILITIES_TABLE : STEP_RESULTS_TABLE,
+    }));
+  });
+}
+
+// True when `valid` would recreate exactly the steps the workflow already has,
+// i.e. only name/description changed and nothing needs rebuilding.
+export function stepsMatch(existingSteps, valid) {
+  const rows = workflowStepRows(valid);
+  if (existingSteps.length !== rows.length) return false;
+  return rows.every((row, i) => {
+    const step = existingSteps[i];
+    return !!step && Object.keys(row).every((key) => step[key] === row[key]);
+  });
+}
+
 // Persist a validated workflow (steps first, then the workflow row).
 async function createWorkflowSteps(tx, valid) {
   const stepIds = [];
-  for (const level of valid.levels) {
-    const isLast = level.depth === valid.maxDepth;
-    const outputFormatText = JSON.stringify(level.outputFormat);
-    for (const step of level.steps) {
-      const created = await tx.step.create({
-        data: {
-          content: step.content,
-          outputFormat: outputFormatText,
-          name: step.name?.trim() || null,
-          depth: level.depth,
-          multiOutput: level.multiOutput,
-          consumesAll: level.consumesAll,
-          isLastStep: isLast,
-          outputTable: isLast ? VULNERABILITIES_TABLE : STEP_RESULTS_TABLE,
-        },
-      });
-      stepIds.push(created.id);
-    }
+  for (const data of workflowStepRows(valid)) {
+    const created = await tx.step.create({ data });
+    stepIds.push(created.id);
   }
   return stepIds;
+}
+
+// Existing steps in stepIds order (findMany does not preserve it).
+async function orderedSteps(tx, stepIds) {
+  const ids = stepIds || [];
+  if (ids.length === 0) return [];
+  const steps = await tx.step.findMany({ where: { id: { in: ids } } });
+  const byId = new Map(steps.map((s) => [s.id.toString(), s]));
+  return ids.map((id) => byId.get(id.toString())).filter(Boolean);
 }
 
 async function persistWorkflow(valid) {
@@ -69,7 +92,17 @@ export async function replaceWorkflowIfUnused(tx, id, valid) {
   const existing = await tx.workflow.findUnique({ where: { id } });
   if (!existing) return { kind: 'not-found' };
   const scanCount = await tx.scan.count({ where: { workflowId: id } });
-  if (scanCount > 0) return { kind: 'in-use', scanCount };
+  if (scanCount > 0) {
+    // Past scan results point at these step rows, so the step tree can't be
+    // rebuilt once the workflow has run — but renaming or re-describing it is
+    // always safe, so let a metadata-only edit through.
+    if (!stepsMatch(await orderedSteps(tx, existing.stepIds), valid)) return { kind: 'in-use', scanCount };
+    const workflow = await tx.workflow.update({
+      where: { id },
+      data: { name: valid.name, description: valid.description, extra: valid.extraKeys },
+    });
+    return { kind: 'updated', workflow };
+  }
 
   const stepIds = await createWorkflowSteps(tx, valid);
   const workflow = await tx.workflow.update({
