@@ -3,7 +3,173 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 
-import { scanActions, ScanStatusPanel } from './ScanDetail.jsx';
+import {
+  activeJobDepthSummary,
+  activeJobWorkflowDepth,
+  formatActiveJobElapsed,
+  loadModelReferences,
+  mergeRunSettingsDraft,
+  runSettingsDraft,
+  runSettingsPayload,
+  scanActions,
+  ScanStatusPanel,
+} from './ScanDetail.jsx';
+
+describe('scan model references', () => {
+  it('keeps OpenRouter exact-ID editing available when catalog discovery fails', async () => {
+    const catalogError = new Error('catalog unavailable');
+    const references = await loadModelReferences(
+      async () => ({ providers: ['openrouter'] }),
+      async () => {
+        throw catalogError;
+      }
+    );
+
+    expect(references).toEqual({ providers: ['openrouter'], catalog: {}, catalogError });
+  });
+
+  it('still treats provider discovery failure as blocking', async () => {
+    await expect(
+      loadModelReferences(
+        async () => {
+          throw new Error('providers unavailable');
+        },
+        async () => ({ providers: [] })
+      )
+    ).rejects.toThrow('providers unavailable');
+  });
+});
+
+describe('scan run settings', () => {
+  const current = {
+    model: 'gpt-5-codex',
+    model_provider: 'codex',
+    thinking_effort: 'medium',
+    post_processing_model_override: false,
+    post_processing_model: 'gpt-5-codex',
+    post_processing_model_provider: 'codex',
+    post_processing_harness: 'codex',
+    post_processing_thinking_effort: 'low',
+    harness: 'codex',
+    model_overrides: {},
+    job_limit: '250',
+  };
+
+  it('preserves the job limit when catalog normalization returns only model fields', () => {
+    const catalogDraft = {
+      model: 'gpt-5-codex',
+      model_provider: 'codex',
+      thinking_effort: 'medium',
+      post_processing_model_override: false,
+      post_processing_model: 'gpt-5-codex',
+      post_processing_model_provider: 'codex',
+      post_processing_harness: 'codex',
+      post_processing_thinking_effort: 'low',
+      harness: 'codex',
+    };
+
+    expect(mergeRunSettingsDraft(current, catalogDraft)).toEqual(current);
+    expect(runSettingsPayload(catalogDraft, current)).toEqual({});
+  });
+
+  it('normalizes older scan records into complete string-valued drafts', () => {
+    expect(runSettingsDraft({ model: 'legacy-model' })).toEqual({
+      model: 'legacy-model',
+      model_provider: 'openrouter',
+      thinking_effort: 'medium',
+      post_processing_model_override: false,
+      post_processing_model: 'legacy-model',
+      post_processing_model_provider: 'openrouter',
+      post_processing_harness: 'codex',
+      post_processing_thinking_effort: 'medium',
+      harness: 'codex',
+      model_overrides: {},
+      job_limit: '',
+    });
+  });
+
+  it('treats fields missing from a partial draft as unchanged', () => {
+    expect(runSettingsPayload({ model: ' replacement-model ' }, current)).toEqual({ model: 'replacement-model' });
+  });
+
+  it('still supports setting and clearing a job limit', () => {
+    expect(runSettingsPayload({ job_limit: ' 25 ' }, { ...current, job_limit: '' })).toEqual({ jobLimit: 25 });
+    expect(runSettingsPayload({ job_limit: '' }, current)).toEqual({ jobLimit: null });
+  });
+
+  it('updates post-processing effort independently', () => {
+    expect(runSettingsPayload({ post_processing_thinking_effort: 'medium' }, current)).toEqual({
+      post_processing_thinking_effort: 'medium',
+    });
+  });
+
+  it('sets and clears an independent post-processing model selection', () => {
+    expect(
+      runSettingsPayload(
+        {
+          post_processing_model_override: true,
+          post_processing_model: 'claude-sonnet',
+          post_processing_model_provider: 'claude',
+          post_processing_harness: 'claude-code',
+          post_processing_thinking_effort: 'high',
+        },
+        current
+      )
+    ).toEqual({
+      post_processing_model: 'claude-sonnet',
+      post_processing_model_provider: 'claude',
+      post_processing_harness: 'claude-code',
+      post_processing_thinking_effort: 'high',
+    });
+
+    expect(
+      runSettingsPayload(
+        { post_processing_model_override: false },
+        {
+          ...current,
+          post_processing_model_override: true,
+          post_processing_model: 'claude-sonnet',
+          post_processing_model_provider: 'claude',
+          post_processing_harness: 'claude-code',
+        }
+      )
+    ).toEqual({
+      post_processing_model: null,
+      post_processing_model_provider: null,
+      post_processing_harness: null,
+    });
+  });
+
+  it('replaces or clears normalized workflow-depth model overrides', () => {
+    const override = {
+      1: {
+        model: 'claude-sonnet',
+        modelProvider: 'claude',
+        harness: 'claude-code',
+        thinkingEffort: 'high',
+      },
+    };
+    expect(runSettingsPayload({ model_overrides: override }, current)).toEqual({
+      model_overrides: {
+        1: {
+          model: 'claude-sonnet',
+          model_provider: 'claude',
+          harness: 'claude-code',
+          thinking_effort: 'high',
+        },
+      },
+    });
+    expect(
+      runSettingsPayload(
+        { model_overrides: {} },
+        {
+          ...current,
+          model_overrides: override,
+        }
+      )
+    ).toEqual({ model_overrides: {} });
+  });
+});
 
 describe('scan lifecycle actions', () => {
   it('offers stop controls without allowing active deletion', () => {
@@ -41,6 +207,98 @@ describe('scan lifecycle actions', () => {
       canResume: false,
       canDelete: true,
     });
+  });
+});
+
+describe('active worker presentation', () => {
+  it('derives workflow depth explicitly and from legacy active-worker titles', () => {
+    expect(activeJobWorkflowDepth({ depth: 3, title: '1 · ignored fallback' })).toBe(3);
+    expect(activeJobWorkflowDepth({ title: '2 · Derive concrete exploit candidates' })).toBe(2);
+    expect(activeJobWorkflowDepth({ kind: 'post_script', depth: 4, title: '4 · ignored' })).toBeNull();
+    expect(activeJobWorkflowDepth({ title: 'Post processing' })).toBeNull();
+  });
+
+  it('summarizes active workers by depth in stable workflow order', () => {
+    expect(
+      activeJobDepthSummary([
+        { depth: 2 },
+        { title: '1 · Trace security-sensitive flows' },
+        { depth: 2 },
+        { kind: 'post_script', title: 'Report Creator' },
+      ])
+    ).toEqual([
+      { key: 'depth-1', label: 'D1', depth: 1, count: 1 },
+      { key: 'depth-2', label: 'D2', depth: 2, count: 2 },
+      { key: 'post', label: 'POST', depth: null, count: 1 },
+    ]);
+  });
+
+  it('formats active harness duration without implying that extended work is stuck', () => {
+    expect(formatActiveJobElapsed(0)).toBe('<1s');
+    expect(formatActiveJobElapsed(56 * 60 * 1000)).toBe('56m');
+    expect(formatActiveJobElapsed((2 * 60 + 7) * 60 * 1000)).toBe('2h 7m');
+  });
+
+  it('renders every server-provided active worker', () => {
+    const html = renderToStaticMarkup(
+      createElement(ScanStatusPanel, {
+        scan: {
+          status: 'running',
+          statusSummary: {
+            totalAttempts: 10,
+            activeJobs: Array.from({ length: 10 }, (_, index) => ({
+              id: `worker-${index + 1}`,
+              phaseLabel: 'Running harness',
+              title: `Worker ${index + 1}`,
+            })),
+          },
+        },
+      })
+    );
+
+    expect(html).toContain('Worker 1');
+    expect(html).toContain('Worker 10');
+  });
+
+  it('renders a complete depth-aware active-worker card', () => {
+    const html = renderToStaticMarkup(
+      createElement(ScanStatusPanel, {
+        scan: {
+          status: 'running',
+          statusSummary: {
+            totalAttempts: 1,
+            activeJobs: [
+              {
+                id: '983',
+                depth: 2,
+                phaseLabel: 'Running harness',
+                title: '2 · Derive concrete exploit candidates',
+                elapsedMs: 56 * 60 * 1000,
+                model: 'gpt-5.6-luna',
+                modelProvider: 'codex',
+                harness: 'codex',
+                thinkingEffort: 'max',
+              },
+            ],
+          },
+        },
+      })
+    );
+
+    expect(html).toContain('Active workers');
+    expect(html).toContain('Depth 2: 1 active worker');
+    expect(html).toContain('Workflow depth 2 worker');
+    expect(html).toContain('D2');
+    expect(html).toContain('longest 56m');
+    expect(html).toContain('extended · 56m');
+    expect(html).toContain('2 · Derive concrete exploit candidates');
+    expect(html).toContain('Model: gpt-5.6-luna; Harness: Codex CLI');
+    expect(html).toContain('gpt-5.6-luna');
+    expect(html).toContain('Codex CLI');
+    expect(html).toContain('white-space:normal');
+    expect(html).toContain('overflow-wrap:anywhere');
+    expect(html).toContain('The engine reports failures separately below.');
+    expect(html).not.toContain('Stuck');
   });
 });
 
@@ -133,6 +391,43 @@ describe('resumed scan error history', () => {
 
     expect(html).toContain('href="/accounts"');
     expect(html).toContain('View usage and limits in Accounts');
+  });
+
+  it('renders low-storage pause failures with the managed actionable message', () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        MemoryRouter,
+        null,
+        createElement(ScanStatusPanel, {
+          scan: {
+            status: 'failed',
+            statusSummary: {
+              recentErrors: [
+                {
+                  id: 'storage-warning-1',
+                  source: 'Scan',
+                  title: 'Scan failure',
+                  phaseLabel: 'Failed',
+                  message:
+                    'Low-storage pause failed. The engine ran low on disk space, then could not save its automatic pause warning. Free disk space, lower Minimum free storage, or enable Ignore low-storage safeguard in Settings, then resume the scan; completed work is preserved.',
+                  knownError: {
+                    key: 'storage_warning_persistence_failed',
+                    title: 'Low-storage pause failed',
+                    fixLinks: [{ label: 'Open Settings', url: '/settings', internal: true }],
+                  },
+                },
+              ],
+            },
+          },
+        })
+      )
+    );
+
+    expect(html).toContain('Low-storage pause failed');
+    expect(html).toContain('enable Ignore low-storage safeguard in Settings');
+    expect(html).toContain('href="/settings"');
+    expect(html).toContain('Open Settings');
+    expect(html).not.toContain('cannot set path in scalar');
   });
 
   it('shows when each status error occurred', () => {

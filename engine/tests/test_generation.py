@@ -387,6 +387,7 @@ def test_generation_runner_retries_validation_with_feedback_and_no_tools(monkeyp
 
 
 def test_generation_runner_persists_codex_refresh_and_restores_private_mode(monkeypatch, tmp_path):
+    monkeypatch.delenv("ENGINE_RUNTIME_CONFIG_PATH", raising=False)
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     auth_path = codex_home / "auth.json"
@@ -403,6 +404,7 @@ def test_generation_runner_persists_codex_refresh_and_restores_private_mode(monk
 
     monkeypatch.setattr(generation_module, "harness_for", lambda *_args, **_kwargs: RefreshingHarness())
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("ENGINE_CODEX_HOME", str(codex_home))
 
     GenerationRunner(SimpleNamespace(data_dir=str(tmp_path))).generate(generation_job())
 
@@ -494,6 +496,7 @@ def test_tool_free_codex_command_disables_search_and_execution_features():
         model_provider="codex",
         thinking_effort="medium",
         allow_tools=True,
+        max_subagents=5,
     )
 
     assert "--search" not in tool_free
@@ -506,6 +509,7 @@ def test_tool_free_codex_command_disables_search_and_execution_features():
     assert not any(value.startswith("model_provider=") for value in tool_free)
     assert "--search" in scan_mode
     assert "--dangerously-bypass-approvals-and-sandbox" in scan_mode
+    assert "agents.max_concurrent_threads_per_session=5" in scan_mode
     assert not any(value.startswith("model_provider=") for value in scan_mode)
 
     provider_default = codex_exec_command(
@@ -1119,6 +1123,7 @@ def test_run_forever_starts_a_dedicated_generation_worker(monkeypatch, tmp_path)
     worker._schedule_codex_update = lambda: None
     worker._schedule_model_catalog_refresh = lambda: None
     monkeypatch.setattr(worker_module, "cleanup_stale_scan_sandboxes", lambda: None)
+    monkeypatch.setattr(worker_module, "cleanup_stale_workspace_snapshot_builders", lambda: None)
     monkeypatch.setattr(worker_module.threading, "Thread", FakeThread)
     monkeypatch.setattr(worker_module.time, "sleep", lambda _seconds: (_ for _ in ()).throw(StopRunForever()))
 

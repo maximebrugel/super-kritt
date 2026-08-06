@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { Prisma } from '@prisma/client';
 
 import { prismaUniqueConflict } from '../src/app.js';
+import { DEFAULT_WORKFLOW_NAMES } from '../src/lib/defaultWorkflows.js';
 import { validateScanJobLimit, ValidationError } from '../src/lib/validation.js';
 import { agentSkillMutationState, countAgentSkillScanUsage } from '../src/routes/agentSkills.js';
 import { summarizeCanonicalFindings } from '../src/routes/overview.js';
 import { countPostScriptScanUsage, postScriptMutationState } from '../src/routes/postScripts.js';
 import {
   ACTIVE_SCAN_STATUSES,
+  assertModelOverridesAvailable,
   deleteScanIfSafe,
   deleteScanOwnedData,
   lockScanConfigurationResources,
@@ -43,6 +46,7 @@ test('referenced workflows cannot be rewritten or have their steps deleted', asy
     },
     scan: { count: async () => 3 },
     step: {
+      findMany: async () => [{ id: 10n }, { id: 11n }],
       create: async () => mutations.push('step.create'),
       deleteMany: async () => mutations.push('step.deleteMany'),
     },
@@ -74,6 +78,57 @@ test('referenced workflows cannot be deleted after taking the workflow row lock'
 
   assert.deepEqual(await deleteWorkflowIfUnused(tx, 7n), { kind: 'in-use', scanCount: 2 });
   assert.deepEqual(calls, ['lock']);
+});
+
+test('unused custom workflows and their steps are deleted after the usage check', async () => {
+  const calls = [];
+  const tx = {
+    $queryRaw: async () => calls.push({ operation: 'lock' }),
+    workflow: {
+      findUnique: async (args) => {
+        calls.push({ operation: 'workflow.findUnique', args });
+        return { id: 7n, name: 'Custom', stepIds: [10n, 11n] };
+      },
+      delete: async (args) => calls.push({ operation: 'workflow.delete', args }),
+    },
+    scan: {
+      count: async (args) => {
+        calls.push({ operation: 'scan.count', args });
+        return 0;
+      },
+    },
+    step: { deleteMany: async (args) => calls.push({ operation: 'step.deleteMany', args }) },
+  };
+
+  assert.deepEqual(await deleteWorkflowIfUnused(tx, 7n), { kind: 'deleted' });
+  assert.deepEqual(calls, [
+    { operation: 'lock' },
+    { operation: 'workflow.findUnique', args: { where: { id: 7n } } },
+    { operation: 'scan.count', args: { where: { workflowId: 7n } } },
+    { operation: 'workflow.delete', args: { where: { id: 7n } } },
+    { operation: 'step.deleteMany', args: { where: { id: { in: [10n, 11n] } } } },
+  ]);
+});
+
+test('built-in and missing workflows cannot be deleted', async () => {
+  const mutations = [];
+  const defaultTx = {
+    $queryRaw: async () => [],
+    workflow: {
+      findUnique: async () => ({ id: 7n, name: DEFAULT_WORKFLOW_NAMES[0], stepIds: [10n] }),
+      delete: async () => mutations.push('workflow.delete'),
+    },
+    scan: { count: async () => mutations.push('scan.count') },
+    step: { deleteMany: async () => mutations.push('step.deleteMany') },
+  };
+  assert.deepEqual(await deleteWorkflowIfUnused(defaultTx, 7n), { kind: 'default' });
+
+  const missingTx = {
+    ...defaultTx,
+    workflow: { ...defaultTx.workflow, findUnique: async () => null },
+  };
+  assert.deepEqual(await deleteWorkflowIfUnused(missingTx, 99n), { kind: 'not-found' });
+  assert.deepEqual(mutations, []);
 });
 
 test('scan cleanup deletes every owned record in dependency order', async () => {
@@ -173,6 +228,239 @@ test('runtime scan updates validate the complete prospective model selection', a
   });
   assert.deepEqual(data, { ...current, model: 'gpt-5.6' });
   assert.deepEqual(checkedSelection, { ...current, model: 'gpt-5.6' });
+});
+
+test('runtime scan updates validate a separate post-processing thinking effort', async () => {
+  const current = {
+    model: 'gpt-5.5',
+    modelProvider: 'codex',
+    harness: 'codex',
+    thinkingEffort: 'high',
+    configuration: { post_processing_thinking_effort: 'high' },
+  };
+  const checkedSelections = [];
+
+  const data = await validateScanRuntimeUpdate({ post_processing_thinking_effort: 'medium' }, current, {
+    assertAvailable: async (selection) => checkedSelections.push(selection),
+  });
+
+  assert.deepEqual(data, { postProcessingThinkingEffort: 'medium' });
+  assert.deepEqual(checkedSelections, [
+    {
+      model: 'gpt-5.5',
+      modelProvider: 'codex',
+      harness: 'codex',
+      thinkingEffort: 'medium',
+    },
+  ]);
+});
+
+test('runtime scan updates set and clear an independent post-processing model selection', async () => {
+  const current = {
+    model: 'gpt-5.5',
+    modelProvider: 'codex',
+    harness: 'codex',
+    thinkingEffort: 'high',
+    configuration: { post_processing_thinking_effort: 'high' },
+  };
+  const checkedSelections = [];
+
+  const data = await validateScanRuntimeUpdate(
+    {
+      post_processing_model: 'claude-sonnet',
+      post_processing_model_provider: 'claude',
+      post_processing_harness: 'claude-code',
+      post_processing_thinking_effort: 'medium',
+    },
+    current,
+    { assertAvailable: async (selection) => checkedSelections.push(selection) }
+  );
+
+  assert.deepEqual(data, {
+    postProcessingModel: 'claude-sonnet',
+    postProcessingModelProvider: 'claude',
+    postProcessingHarness: 'claude-code',
+    postProcessingThinkingEffort: 'medium',
+  });
+  assert.deepEqual(checkedSelections, [
+    {
+      model: 'claude-sonnet',
+      modelProvider: 'claude',
+      harness: 'claude-code',
+      thinkingEffort: 'medium',
+    },
+  ]);
+
+  const cleared = await validateScanRuntimeUpdate(
+    {
+      post_processing_model: null,
+      post_processing_model_provider: null,
+      post_processing_harness: null,
+    },
+    {
+      ...current,
+      configuration: {
+        post_processing_model: 'claude-sonnet',
+        post_processing_model_provider: 'claude',
+        post_processing_harness: 'claude-code',
+        post_processing_thinking_effort: 'medium',
+      },
+    },
+    { assertAvailable: async () => {} }
+  );
+
+  assert.deepEqual(cleared, {
+    postProcessingModel: null,
+    postProcessingModelProvider: null,
+    postProcessingHarness: null,
+  });
+});
+
+test('runtime scan updates validate and replace depth model overrides', async () => {
+  const current = {
+    model: 'gpt-5.5',
+    modelProvider: 'codex',
+    harness: 'codex',
+    thinkingEffort: 'high',
+    modelOverrides: {},
+  };
+  const checkedSelections = [];
+  const data = await validateScanRuntimeUpdate(
+    {
+      model_overrides: {
+        1: {
+          model: 'claude-sonnet',
+          model_provider: 'claude',
+          harness: 'claude-code',
+          thinking_effort: 'medium',
+        },
+      },
+    },
+    current,
+    {
+      allowedDepths: [0, 1],
+      assertAvailable: async (selection) => checkedSelections.push(selection),
+    }
+  );
+
+  assert.deepEqual(data, {
+    modelOverrides: {
+      1: {
+        model: 'claude-sonnet',
+        model_provider: 'claude',
+        harness: 'claude-code',
+        thinking_effort: 'medium',
+      },
+    },
+  });
+  assert.deepEqual(checkedSelections, [
+    {
+      model: 'claude-sonnet',
+      modelProvider: 'claude',
+      harness: 'claude-code',
+      thinkingEffort: 'medium',
+    },
+  ]);
+
+  const deduplicatedSelections = [];
+  await assertModelOverridesAvailable(
+    {
+      0: data.modelOverrides[1],
+      1: data.modelOverrides[1],
+    },
+    async (selection) => deduplicatedSelections.push(selection)
+  );
+  assert.deepEqual(deduplicatedSelections, checkedSelections);
+
+  await assert.rejects(
+    assertModelOverridesAvailable(data.modelOverrides, async () => {
+      throw new ValidationError([{ field: 'model', message: 'Unavailable.' }]);
+    }),
+    (error) =>
+      error instanceof ValidationError &&
+      error.errors.some((item) => item.field === 'model_overrides.1.model' && item.message === 'Unavailable.')
+  );
+});
+
+test('runtime PATCH verifies override keys against the locked scan workflow', async () => {
+  const calls = [];
+  const current = {
+    id: 8n,
+    workflowId: 4n,
+    status: 'paused',
+    model: 'gpt-5.5',
+    modelProvider: 'codex',
+    harness: 'codex',
+    thinkingEffort: 'high',
+    modelOverrides: {},
+  };
+  const tx = {
+    $queryRaw: async () => calls.push('lock'),
+    workflow: {
+      findUnique: async () => ({ stepIds: [10n, 20n] }),
+    },
+    step: {
+      findMany: async () => [{ depth: 0 }, { depth: 1 }],
+    },
+    scan: {
+      findUnique: async () => current,
+      update: async ({ data }) => {
+        calls.push({ data });
+        return { ...current, ...data };
+      },
+    },
+  };
+
+  const result = await patchScanIfPresent(
+    tx,
+    8n,
+    {
+      modelOverrides: {
+        1: {
+          model: 'claude-sonnet',
+          modelProvider: 'claude',
+          harness: 'claude-code',
+          thinkingEffort: 'high',
+        },
+      },
+    },
+    { assertAvailable: async () => {} }
+  );
+
+  assert.equal(result.kind, 'updated');
+  assert.deepEqual(calls.at(-1), {
+    data: {
+      modelOverrides: {
+        1: {
+          model: 'claude-sonnet',
+          model_provider: 'claude',
+          harness: 'claude-code',
+          thinking_effort: 'high',
+        },
+      },
+    },
+  });
+
+  await assert.rejects(
+    patchScanIfPresent(
+      tx,
+      8n,
+      {
+        model_overrides: {
+          2: {
+            model: 'gpt-5.5',
+            model_provider: 'codex',
+            harness: 'codex',
+            thinking_effort: 'high',
+          },
+        },
+      },
+      { assertAvailable: async () => {} }
+    ),
+    (error) =>
+      error instanceof ValidationError &&
+      error.errors.some((item) => item.field === 'model_overrides.2' && item.message.includes('does not exist'))
+  );
 });
 
 test('runtime PATCH locks the scan and atomically writes the full normalized tuple', async () => {
@@ -286,7 +574,7 @@ test('failed scans resume through pending and establish a new error-history boun
   assert.equal(result.kind, 'updated');
   assert.equal(calls[0], 'lock');
   assert.equal(calls[1].data.status, 'pending');
-  assert.equal(calls[1].data.reasoning, null);
+  assert.equal(calls[1].data.reasoning, Prisma.DbNull);
   assert.ok(calls[1].data.lastResumedAt instanceof Date);
 });
 

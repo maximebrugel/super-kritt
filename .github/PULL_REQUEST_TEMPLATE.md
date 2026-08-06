@@ -30,7 +30,7 @@ Closes #
 ## Checklist
 
 - [ ] Commits use [Conventional Commits](https://www.conventionalcommits.org/) (no empty `()` scope)
-- [ ] Commits are **signed off** (`git commit -s`) — DCO
+- [ ] Commits are signed off (`git commit -s`)
 - [ ] Lint & format pass (`npm run lint` / `ruff check .`)
 - [ ] Tests added/updated and passing where it makes sense
 - [ ] Docs updated if behavior or config changed

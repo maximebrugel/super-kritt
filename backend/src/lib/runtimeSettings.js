@@ -31,9 +31,40 @@ export const RUNTIME_SETTING_DEFINITIONS = Object.freeze({
     recommendedMax: 10,
     apply: 'live',
   }),
+  workersPerAccount: Object.freeze({
+    envKey: 'ENGINE_WORKERS_PER_ACCOUNT',
+    defaultValue: 15,
+    min: 1,
+    max: 128,
+    recommendedMax: 15,
+    apply: 'live',
+  }),
   autoscaleScanWorkersOnProviderCapacity: Object.freeze({
     envKey: 'ENGINE_AUTOSCALE_SCAN_WORKERS_ON_PROVIDER_CAPACITY',
     defaultValue: true,
+    type: 'boolean',
+    apply: 'live',
+  }),
+  codexMaxSubagentsPerSession: Object.freeze({
+    envKey: 'ENGINE_CODEX_MAX_SUBAGENTS_PER_SESSION',
+    defaultValue: 5,
+    min: 1,
+    max: 5,
+    recommendedMax: 5,
+    apply: 'live',
+  }),
+  minFreeStorageGb: Object.freeze({
+    envKey: 'ENGINE_MIN_FREE_STORAGE_GB',
+    defaultValue: 20,
+    min: 0,
+    max: 1024,
+    step: 0.1,
+    type: 'number',
+    apply: 'live',
+  }),
+  ignoreLowStorage: Object.freeze({
+    envKey: 'ENGINE_IGNORE_LOW_STORAGE',
+    defaultValue: false,
     type: 'boolean',
     apply: 'live',
   }),
@@ -81,6 +112,13 @@ function parsedSettingValue(raw, definition) {
     if (/^(?:0|false|no|off)$/i.test(text)) return { value: false, valid: true };
     return { value: definition.defaultValue, valid: false };
   }
+  if (definition.type === 'number') {
+    const value = Number(text);
+    if (!text || !Number.isFinite(value) || value < definition.min || value > definition.max) {
+      return { value: definition.defaultValue, valid: false };
+    }
+    return { value, valid: true };
+  }
   if (!/^-?\d+$/.test(text)) return { value: definition.defaultValue, valid: false };
   const value = Number(text);
   if (!Number.isSafeInteger(value) || value < definition.min || value > definition.max) {
@@ -106,6 +144,7 @@ function resolvedSetting(definition, runtimeValues, projectValues, env) {
     defaultValue: definition.defaultValue,
     min: definition.min,
     max: definition.max,
+    step: definition.step,
     recommendedMax: definition.recommendedMax,
     apply: definition.apply,
   };
@@ -160,6 +199,21 @@ export function validateRuntimeSettingsPatch(body) {
         errors.push({ field: key, message: 'Choose enabled or disabled.' });
       } else {
         values[key] = raw;
+      }
+      continue;
+    }
+    if (definition.type === 'number') {
+      const text = typeof raw === 'number' || typeof raw === 'string' ? `${raw}`.trim() : '';
+      const value = Number(text);
+      if (!text || !Number.isFinite(value)) {
+        errors.push({ field: key, message: 'Enter a number.' });
+      } else if (value < definition.min || value > definition.max) {
+        errors.push({
+          field: key,
+          message: `Enter a value from ${definition.min} to ${definition.max}.`,
+        });
+      } else {
+        values[key] = value;
       }
       continue;
     }

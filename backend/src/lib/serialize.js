@@ -257,10 +257,35 @@ function serializeDependencies(scan) {
   }));
 }
 
+function serializeModelOverrides(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(
+        ([depth, configuration]) =>
+          /^(?:0|[1-9]\d*)$/.test(depth) &&
+          configuration &&
+          typeof configuration === 'object' &&
+          !Array.isArray(configuration)
+      )
+      .sort(([left], [right]) => Number(left) - Number(right))
+      .map(([depth, configuration]) => [
+        depth,
+        {
+          model: configuration.model ?? '',
+          modelProvider: configuration.model_provider ?? configuration.modelProvider ?? null,
+          harness: configuration.harness ?? '',
+          thinkingEffort: configuration.thinking_effort ?? configuration.thinkingEffort ?? null,
+        },
+      ])
+  );
+}
+
 export function serializeScan(
   scan,
   {
     workflowName,
+    workflowDepths = [],
     postScriptName,
     postScripts = [],
     agentSkills = [],
@@ -277,6 +302,17 @@ export function serializeScan(
 ) {
   const commit = scan.commitSha || '';
   const agentSkillIds = (scan.agentSkillIds || []).map((id) => id.toString());
+  const configuration =
+    scan.configuration && typeof scan.configuration === 'object' && !Array.isArray(scan.configuration)
+      ? scan.configuration
+      : {};
+  const postProcessingModel = configuration.post_processing_model ?? configuration.postProcessingModel;
+  const postProcessingModelProvider =
+    configuration.post_processing_model_provider ?? configuration.postProcessingModelProvider;
+  const postProcessingHarness = configuration.post_processing_harness ?? configuration.postProcessingHarness;
+  const postProcessingModelOverride = [postProcessingModel, postProcessingModelProvider, postProcessingHarness].some(
+    (value) => value !== undefined && value !== null && `${value}`.trim() !== ''
+  );
   return {
     id: scan.id.toString(),
     repoFull: scan.repoFull,
@@ -286,14 +322,25 @@ export function serializeScan(
     commitShort: commit.length > 7 ? commit.slice(0, 7) : commit,
     repoScope: scan.repoScope,
     dependencies: serializeDependencies(scan),
-    configuration: scan.configuration || {},
+    configuration,
     model: scan.model,
     modelProvider: scan.modelProvider ?? null,
     harness: scan.harness,
     thinkingEffort: scan.thinkingEffort ?? null,
+    postProcessingModel: postProcessingModel ?? scan.model,
+    postProcessingModelProvider: postProcessingModelProvider ?? scan.modelProvider ?? null,
+    postProcessingHarness: postProcessingHarness ?? scan.harness,
+    postProcessingModelOverride,
+    postProcessingThinkingEffort:
+      configuration.post_processing_thinking_effort ??
+      configuration.postProcessingThinkingEffort ??
+      scan.thinkingEffort ??
+      null,
+    modelOverrides: serializeModelOverrides(scan.modelOverrides),
     status: scan.status,
     workflowId: scan.workflowId.toString(),
     workflowName: workflowName ?? null,
+    workflowDepths,
     postScriptId: scan.postScriptId.toString(),
     postScriptName: postScriptName ?? null,
     postScripts: postScripts.map((postScript) => ({

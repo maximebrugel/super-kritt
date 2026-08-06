@@ -132,6 +132,41 @@ test('screen renderers fill the requested terminal height and never reveal secre
   assert.match(input, /•+/);
 });
 
+test('menu options and footer stay visible on a short terminal even with many detail lines', () => {
+  const options = [
+    { id: 'codex-login', label: 'Codex login', description: 'recommended - sign in with a device code' },
+    { id: 'claude-login', label: 'Claude login', description: 'sign in with a Claude subscription' },
+    { id: 'CODEX_API_KEY', label: 'Codex API key', description: 'not set' },
+    { id: 'OPENAI_API_KEY', label: 'OpenAI API key', description: 'not set' },
+    { id: 'ANTHROPIC_API_KEY', label: 'Anthropic API key', description: 'not set' },
+    { id: 'OPENROUTER_API_KEY', label: 'OpenRouter API key', description: 'not set' },
+    { id: 'GITHUB_TOKEN', label: 'GitHub token', description: 'optional for private repositories' },
+    { id: 'back', label: 'Back', description: 'Return to the main menu' },
+  ];
+  const details = [
+    '○ Codex login not set (recommended)',
+    '○ Claude login not set',
+    '○ Codex API key not set',
+    '○ OpenAI API key not set',
+    '○ Anthropic API key not set',
+    '○ OpenRouter API key not set',
+    '○ GitHub token not set (optional)',
+  ];
+
+  const screen = renderMenuScreen({
+    title: 'Setup',
+    subtitle: 'Choose one option to configure model access',
+    details,
+    options,
+    selected: 1,
+    rows: 14,
+    width: 90,
+  });
+
+  assert.match(screen, /› Claude login/);
+  for (const option of options) assert.match(screen, new RegExp(option.label));
+});
+
 test('menu details can carry semantic color without changing their text', () => {
   const screen = renderMenuScreen({
     title: 'Setup',

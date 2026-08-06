@@ -110,8 +110,12 @@
   "navbar": {
     "links": [
       {
+        "label": "Kritt.ai",
+        "href": "https://kritt.ai"
+      },
+      {
         "label": "GitHub",
-        "href": "https://github.com/Kritt-ai/open-kritt"
+        "href": "https://kritt.ai/github"
       }
     ],
     "primary": {
@@ -122,8 +126,8 @@
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/Kritt-ai/open-kritt",
-      "x": "https://x.com/ControlZ_1337"
+      "github": "https://kritt.ai/github",
+      "x": "https://x.com/Kritt_AI"
     }
   }
 }

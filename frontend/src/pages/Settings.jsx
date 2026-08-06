@@ -25,10 +25,36 @@ const PRESENTATION = {
     unit: 'workers',
     description: 'Hard cap for one scan. Set 0 to divide worker slots automatically and fairly across active scans.',
   },
-  autoscaleScanWorkersOnProviderCapacity: {
-    label: 'Autoscale scan workers on provider capacity errors',
+  workersPerAccount: {
+    label: 'Workers per account',
+    unit: 'workers',
     description:
-      'When a provider reports temporary server-capacity throttling, lower only that scan’s future worker cap by one and retry. Account quota errors are not autoscaled.',
+      'Maximum concurrent root model calls assigned to the same provider account across scans. Codex subagents inside each session use their separate cap.',
+  },
+  autoscaleScanWorkersOnProviderCapacity: {
+    label: 'Autoscale scan workers on capacity errors',
+    description:
+      'When a provider reports temporary server-capacity throttling or Codex reaches its separate subagent limit, lower only that scan’s future worker cap by one and retry. Account quota errors are not autoscaled.',
+    enabledDescription: 'Capacity throttles reduce the affected scan by one worker.',
+    disabledDescription: 'Worker caps remain fixed.',
+  },
+  codexMaxSubagentsPerSession: {
+    label: 'Codex subagents per session',
+    unit: 'subagents',
+    description: 'Hard cap for concurrently running child agents inside each Codex scan session.',
+  },
+  minFreeStorageGb: {
+    label: 'Minimum free storage',
+    unit: 'GiB',
+    description:
+      'Pause new scan containers when free disk space falls below this level. Lowering it can keep scans moving, but increases the risk of filling the disk completely.',
+  },
+  ignoreLowStorage: {
+    label: 'Ignore low-storage safeguard',
+    description:
+      'Allow new scan containers to start regardless of available disk space. Use only when you accept the risk of exhausting the host disk.',
+    enabledDescription: 'The minimum free-storage threshold is not enforced.',
+    disabledDescription: 'New containers pause below the configured threshold.',
   },
   workspaceSetupConcurrency: {
     label: 'Workspace setup concurrency',
@@ -107,6 +133,13 @@ export default function Settings() {
       patch.workerCount > worker.recommendedMax &&
       !window.confirm(
         `Use ${patch.workerCount} engine workers? Values above ${worker.recommendedMax} can exhaust provider, Docker, network, CPU, or memory capacity.`
+      )
+    )
+      return;
+    if (
+      patch.ignoreLowStorage === true &&
+      !window.confirm(
+        'Ignore the low-storage safeguard? New scan containers may fill the host disk, causing scans or other services to fail.'
       )
     )
       return;
@@ -201,6 +234,7 @@ export default function Settings() {
                     value={draft[key]}
                     issue={issues[key]}
                     disabled={saving}
+                    ignored={key === 'minFreeStorageGb' && draft.ignoreLowStorage}
                     onChange={(value) => set(key, value)}
                   />
                 )
@@ -248,9 +282,7 @@ function BooleanRuntimeSetting({ name, presentation, setting, value, issue, disa
       <label className="settings-toggle-row" htmlFor={`setting-${name}`}>
         <span>
           <strong>{value ? 'Enabled' : 'Disabled'}</strong>
-          <small>
-            {value ? 'Capacity throttles reduce the affected scan by one worker.' : 'Worker caps remain fixed.'}
-          </small>
+          <small>{value ? presentation.enabledDescription : presentation.disabledDescription}</small>
         </span>
         <input
           id={`setting-${name}`}
@@ -268,14 +300,15 @@ function BooleanRuntimeSetting({ name, presentation, setting, value, issue, disa
       <div className="settings-card-meta">
         <span className="mono settings-env-key">{setting.envKey}</span>
         <span>{SOURCE_LABELS[setting.source] || setting.source}</span>
-        <span>Default enabled</span>
+        <span>Default {setting.defaultValue ? 'enabled' : 'disabled'}</span>
       </div>
     </article>
   );
 }
 
-function RuntimeSetting({ name, presentation, setting, value, issue, disabled, onChange }) {
-  const numericValue = /^-?\d+$/.test(`${value}`.trim()) ? Number(value) : null;
+function RuntimeSetting({ name, presentation, setting, value, issue, disabled, ignored, onChange }) {
+  const rawValue = `${value}`.trim();
+  const numericValue = rawValue && Number.isFinite(Number(rawValue)) ? Number(rawValue) : null;
   const aboveRecommendation = numericValue !== null && numericValue > setting.recommendedMax;
   const paused = name === 'workerCount' && numericValue === 0;
   return (
@@ -295,10 +328,10 @@ function RuntimeSetting({ name, presentation, setting, value, issue, disabled, o
         id={`setting-${name}`}
         className="mono settings-number-input"
         type="number"
-        inputMode="numeric"
+        inputMode={setting.type === 'number' ? 'decimal' : 'numeric'}
         min={setting.min}
         max={setting.max}
-        step="1"
+        step={setting.step || 1}
         value={value}
         disabled={disabled}
         aria-invalid={Boolean(issue) || !setting.valid}
@@ -308,11 +341,13 @@ function RuntimeSetting({ name, presentation, setting, value, issue, disabled, o
       {!setting.valid && !issue && (
         <div className="settings-field-error">The stored value was invalid; the safe default is shown.</div>
       )}
-      {(aboveRecommendation || paused) && !issue && (
+      {(aboveRecommendation || paused || ignored) && !issue && (
         <div className="settings-field-warning">
-          {paused
-            ? 'New engine work will remain queued until worker slots are raised above zero.'
-            : `Above the conservative recommendation of ${setting.recommendedMax}; verify provider and host capacity.`}
+          {ignored
+            ? 'This threshold is preserved but not enforced while the low-storage safeguard is ignored.'
+            : paused
+              ? 'New engine work will remain queued until worker slots are raised above zero.'
+              : `Above the conservative recommendation of ${setting.recommendedMax}; verify provider and host capacity.`}
         </div>
       )}
       <div className="settings-card-meta">
