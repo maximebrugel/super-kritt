@@ -108,10 +108,12 @@ export const api = {
   // configured providers and their selectable model catalogs
   modelCatalog: () => request('/model-catalog'),
   // provider accounts, provider login sessions, and the managed OpenRouter key
-  accounts: (refresh = false) => request(`/accounts${refresh ? '?refresh=1' : ''}`),
-  accountSummary: () => request('/accounts/summary'),
+  accounts: (refresh = false) => request(`/accounts${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' }),
+  accountSummary: () => request('/accounts/summary', { cache: 'no-store' }),
   accountProvider: (provider, refresh = false) =>
-    request(`/accounts/provider/${encodeURIComponent(provider)}${refresh ? '?refresh=1' : ''}`),
+    request(`/accounts/provider/${encodeURIComponent(provider)}${refresh ? '?refresh=1' : ''}`, {
+      cache: 'no-store',
+    }),
   saveProviderCredential: (provider, credential) =>
     request(`/accounts/${provider}`, { method: 'POST', body: { credential } }),
   removeProviderCredential: (provider) => request(`/accounts/${provider}`, { method: 'DELETE' }),
@@ -131,7 +133,7 @@ export const api = {
       method: 'POST',
       ...(accountId ? { body: { accountId } } : {}),
     }),
-  providerLogin: (sessionId) => request(`/accounts/login/${sessionId}`),
+  providerLogin: (sessionId) => request(`/accounts/login/${sessionId}`, { cache: 'no-store' }),
   submitProviderLoginCode: (sessionId, code) =>
     request(`/accounts/login/${sessionId}/input`, { method: 'POST', body: { code } }),
   cancelProviderLogin: (sessionId) => request(`/accounts/login/${sessionId}`, { method: 'DELETE' }),
@@ -146,6 +148,7 @@ export const api = {
   updateVulnerability: (id, body) => request(`/vulnerabilities/${id}`, { method: 'PATCH', body }),
   // local repos available to scan
   localRepos: () => request('/local-repos'),
+  localRepoStats: (name, options) => request(`/local-repos/${encodeURIComponent(name)}/stats`, options),
   // post-scripts
   postScripts: () => request('/post-scripts'),
   postScript: (id) => request(`/post-scripts/${id}`),

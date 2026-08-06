@@ -17,7 +17,7 @@ from .harnesses import HarnessError, harness_for, normalize_harness_name
 from .prompting import append_schema_prompt
 from .provider_credentials import provider_environment
 from .schema import EXTRACTOR_HELPER_FIELD
-from .workspace import codex_home_for_job
+from .workspace import codex_home_for_job, provider_account_lease
 
 BUILTIN_KEYS = (
     "repo_full",
@@ -771,16 +771,21 @@ class GenerationRunner:
         feedback = ""
         for attempt in range(1, attempts + 1):
             try:
-                with preserve_codex_auth_metadata(env):
-                    result = harness.run(
-                        prompt=prompt + feedback,
-                        schema=schema,
-                        repo_dir=self._work_dir(),
-                        model=request["model"],
-                        thinking_effort=request["thinking_effort"],
-                        env=env,
-                        allow_tools=False,
-                    )
+                with provider_account_lease(
+                    request["model_provider"],
+                    selected_codex_home,
+                    data_dir=getattr(self.config, "data_dir", None),
+                ):
+                    with preserve_codex_auth_metadata(env):
+                        result = harness.run(
+                            prompt=prompt + feedback,
+                            schema=schema,
+                            repo_dir=self._work_dir(),
+                            model=request["model"],
+                            thinking_effort=request["thinking_effort"],
+                            env=env,
+                            allow_tools=False,
+                        )
                 artifact = validate_generation_payload(request["kind"], result.payload)
                 return GenerationRunResult(
                     artifact=artifact,

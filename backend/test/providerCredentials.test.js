@@ -158,6 +158,32 @@ test('Codex homes left on disk but removed from the runtime registry stay inacti
   assert.equal(codex.configured, false);
 });
 
+test('provider status recognizes managed Claude homes in the runtime registry', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'open-kritt-provider-claude-accounts-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const accountsRoot = join(directory, 'claude-accounts');
+  const accountHome = join(accountsRoot, 'reviewer', '.claude');
+  const runtimeConfigPath = join(directory, 'engine-runtime.env');
+  await mkdir(accountHome, { recursive: true });
+  await writeFile(join(accountHome, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"x"}}');
+  await writeFile(runtimeConfigPath, 'ENGINE_CLAUDE_HOME=/claude-accounts/reviewer/.claude\n');
+
+  const claude = providerCredentialStatuses({
+    env: {},
+    credentialsPath: join(directory, 'missing.json'),
+    loginOptions: {
+      claude: {
+        home: join(directory, 'unused-primary'),
+        accountsRoot,
+        runtimeConfigPath,
+      },
+    },
+  }).find((provider) => provider.id === 'claude');
+
+  assert.equal(claude.configured, true);
+  assert.equal(claude.source, 'claude_login');
+});
+
 test('account overview merges executor detail without exposing unrecognized fields', () => {
   const statuses = providerCredentialStatuses({
     env: { OPEN_KRITT_OPENROUTER_API_KEY_CONFIGURED: '1' },

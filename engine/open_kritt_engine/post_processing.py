@@ -6,8 +6,14 @@ from jsonschema import Draft202012Validator
 
 from .claude_auth import ClaudeCredentialRateLimited
 from .db import now_utc
-from .harnesses import RETRYABLE_RATE_LIMIT_FAILURES, HarnessError, normalize_harness_name, scan_model_provider
+from .harnesses import (
+    CAPACITY_RATE_LIMIT_FAILURES,
+    RETRYABLE_RATE_LIMIT_FAILURES,
+    HarnessError,
+    normalize_harness_name,
+)
 from .model_output_artifacts import record_model_error_output
+from .models import post_processing_model_selection
 from .prompting import (
     append_schema_prompt,
     harness_prompt,
@@ -23,9 +29,11 @@ from .schema import EXTRACTOR_HELPER_FIELD, OutputValidationError, output_schema
 from .workspace import (
     cleanup_job_workspace,
     cleanup_workspace,
+    image_workspace_enabled,
     mark_provider_account_available,
     mark_provider_account_rate_limited,
     prepare_dependency_workspace,
+    provider_account_lease,
     workspace_context,
     workspace_prompt_context,
 )
@@ -426,9 +434,10 @@ def configured_post_script_ids(scan: dict[str, Any]) -> list[int]:
 
 
 class PostProcessor:
-    def __init__(self, config, db):
+    def __init__(self, config, db, *, workspace_setup_slots=None):
         self.config = config
         self.db = db
+        self.workspace_setup_slots = workspace_setup_slots
 
     def process_once(self, scan: dict[str, Any], harness) -> bool:
         scan_id = _int(scan["id"])
@@ -446,19 +455,25 @@ class PostProcessor:
         if any(row.get("dedupe_is_canonical") is None for row in vulnerabilities):
             return self._run_next_dedupe_batch(scan, harness)
 
-        if any(row.get("dedupe_is_canonical") is True and row.get("bounty_rank") is None for row in vulnerabilities):
-            return self._run_next_ranker_batch(scan, harness)
+        ranking_pending = any(
+            row.get("dedupe_is_canonical") is True and row.get("bounty_rank") is None for row in vulnerabilities
+        )
+        if ranking_pending and self._run_next_ranker_batch(scan, harness):
+            return True
 
-        return self._run_next_post_script_or_complete(scan, harness)
+        # A different worker owns the serialized ranker. This worker can still
+        # enrich findings because post scripts do not participate in rank ordering.
+        return self._run_next_post_script_or_complete(
+            scan,
+            harness,
+            allow_complete=not ranking_pending,
+        )
 
     def _agent_skills(self, scan: dict[str, Any]) -> list[dict[str, Any]]:
         if not hasattr(self.db, "load_agent_skills"):
             return []
         with self.db.connect() as conn:
             return self.db.load_agent_skills(conn, scan)
-
-    def _model_provider(self, scan: dict[str, Any]) -> str | None:
-        return scan_model_provider(scan)
 
     def _retry_count(self) -> int:
         return runtime_int(
@@ -472,16 +487,24 @@ class PostProcessor:
     def _prepare_workspace(
         self, metadata_id: int, scan: dict[str, Any], agent_skills: list[dict[str, Any]] | None = None
     ):
-        return prepare_dependency_workspace(
-            data_dir=self.config.data_dir,
-            checkout_cache_dir=getattr(self.config, "checkout_cache_dir", None),
-            metadata_id=POST_WORKSPACE_ID_OFFSET + metadata_id,
-            scan=scan,
-            github_token=self.config.github_token,
-            agent_skills=agent_skills or [],
-            harness_name=normalize_harness_name(scan["harness"]),
-            model_provider=self._model_provider(scan),
-        )
+        def prepare():
+            selection = post_processing_model_selection(scan)
+            return prepare_dependency_workspace(
+                data_dir=self.config.data_dir,
+                checkout_cache_dir=getattr(self.config, "checkout_cache_dir", None),
+                metadata_id=POST_WORKSPACE_ID_OFFSET + metadata_id,
+                scan=scan,
+                github_token=self.config.github_token,
+                agent_skills=agent_skills or [],
+                harness_name=normalize_harness_name(selection.harness),
+                model_provider=selection.model_provider,
+                use_snapshot_image=image_workspace_enabled(data_dir=getattr(self.config, "data_dir", None)),
+            )
+
+        if self.workspace_setup_slots is None:
+            return prepare()
+        with self.workspace_setup_slots:
+            return prepare()
 
     def _run_harness_with_retries(
         self,
@@ -499,6 +522,7 @@ class PostProcessor:
     ) -> tuple[dict[str, Any], dict[str, Any] | None, str | None, str]:
         prepared = None
         try:
+            selection = post_processing_model_selection(scan)
             agent_skills = self._agent_skills(scan)
             prepared = self._prepare_workspace(metadata_id, scan, agent_skills=agent_skills)
             checked_out_commit = prepared.checked_out_commit
@@ -506,22 +530,23 @@ class PostProcessor:
                 context = {**(prompt_context or {}), **workspace_context(prepared)}
                 if "{{patched_since_history}}" in prompt_template:
                     context["patched_since_history"] = patched_since_workspace_history_context(
-                        prepared.repo_dir,
+                        getattr(prepared, "source_repo_dir", None) or prepared.repo_dir,
                         prepared.manifest,
                         scan,
                         context.get("file_path"),
+                        github_token=getattr(self.config, "github_token", None),
                     )
                 rendered = render_prompt(prompt_template, context)
                 prompt_body = harness_prompt(rendered, multi_output=multi_output, schema=schema)
             else:
                 prompt_body = append_schema_prompt(prompt, schema)
             prompt_parts = [
-                native_agent_skills_prompt(agent_skills, normalize_harness_name(scan["harness"])),
+                native_agent_skills_prompt(agent_skills, normalize_harness_name(selection.harness)),
                 workspace_prompt_context(prepared.layout, prepared.manifest_json),
                 prompt_body,
             ]
             final_prompt = "\n\n".join(part for part in prompt_parts if part)
-            thinking_effort = scan.get("thinking_effort") or "medium"
+            thinking_effort = selection.thinking_effort
             with self.db.connect() as conn:
                 self.db.update_post_process_metadata(
                     conn,
@@ -534,8 +559,8 @@ class PostProcessor:
                     prompt_filled=final_prompt,
                     phase="running_harness",
                     codex_source_home=getattr(prepared.workspace, "codex_source_home", None),
-                    codex_account_id=getattr(prepared.workspace, "codex_account_id", None),
-                    codex_account_email=getattr(prepared.workspace, "codex_account_email", None),
+                    codex_account_id=getattr(prepared.workspace, "provider_account_id", None),
+                    codex_account_email=getattr(prepared.workspace, "provider_account_email", None),
                 )
                 conn.commit()
 
@@ -548,14 +573,25 @@ class PostProcessor:
                 codex_session_id = None
                 result = None
                 try:
-                    result = harness.run(
-                        prompt=final_prompt,
-                        schema=schema,
-                        repo_dir=prepared.repo_dir,
-                        model=scan["model"],
-                        thinking_effort=thinking_effort,
-                        env=prepared.workspace.env,
-                    )
+                    with provider_account_lease(
+                        getattr(prepared.workspace, "provider_account_provider", None),
+                        getattr(prepared.workspace, "provider_account_home", None),
+                        data_dir=getattr(self.config, "data_dir", None),
+                    ):
+                        harness_arguments = {
+                            "prompt": final_prompt,
+                            "schema": schema,
+                            "repo_dir": prepared.repo_dir,
+                            "model": selection.model,
+                            "thinking_effort": thinking_effort,
+                            "env": prepared.workspace.env,
+                        }
+                        runner_image = getattr(prepared, "runner_image", None)
+                        if runner_image:
+                            harness_arguments["runner_image"] = runner_image
+                        result = harness.run(
+                            **harness_arguments,
+                        )
                     mark_provider_account_available(
                         getattr(prepared.workspace, "provider_account_provider", None),
                         getattr(prepared.workspace, "provider_account_home", None),
@@ -611,14 +647,14 @@ class PostProcessor:
                             codex_session_id=codex_session_id,
                             phase="running_harness",
                             codex_source_home=getattr(prepared.workspace, "codex_source_home", None),
-                            codex_account_id=getattr(prepared.workspace, "codex_account_id", None),
-                            codex_account_email=getattr(prepared.workspace, "codex_account_email", None),
+                            codex_account_id=getattr(prepared.workspace, "provider_account_id", None),
+                            codex_account_email=getattr(prepared.workspace, "provider_account_email", None),
                         )
                         conn.commit()
                     if isinstance(exc, HarnessError) and (
                         exc.code in RETRYABLE_RATE_LIMIT_FAILURES or not exc.retryable
                     ):
-                        if exc.code in RETRYABLE_RATE_LIMIT_FAILURES and exc.code != "provider_throttled":
+                        if exc.code in RETRYABLE_RATE_LIMIT_FAILURES and exc.code not in CAPACITY_RATE_LIMIT_FAILURES:
                             mark_provider_account_rate_limited(
                                 getattr(prepared.workspace, "provider_account_provider", None),
                                 getattr(prepared.workspace, "provider_account_home", None),
@@ -675,6 +711,7 @@ class PostProcessor:
             prompt = build_dedupe_prompt(current, anchors, targets)
             batch_index = self.db.next_post_process_batch_index(conn, scan_id, "dedupe")
             started = now_utc()
+            selection = post_processing_model_selection(current)
             metadata_id = self.db.claim_post_process_metadata(
                 conn,
                 scan_id=scan_id,
@@ -684,10 +721,10 @@ class PostProcessor:
                 target_vulnerability_ids=[_int(row["id"]) for row in targets],
                 prompt_template="anchored-dedupe",
                 prompt_filled="",
-                model=current["model"],
-                harness=current["harness"],
-                thinking_effort=current.get("thinking_effort"),
-                model_provider=self._model_provider(current),
+                model=selection.model,
+                harness=selection.harness,
+                thinking_effort=selection.thinking_effort,
+                model_provider=selection.model_provider,
                 run_started_at=started,
             )
             conn.commit()
@@ -716,7 +753,7 @@ class PostProcessor:
                     conn,
                     scan_id=scan_id,
                     dedupe_run_id=metadata_id,
-                    dedupe_model=current["model"],
+                    dedupe_model=selection.model,
                     mapping=mapping,
                 )
                 self.db.update_post_process_metadata(
@@ -763,6 +800,7 @@ class PostProcessor:
             prompt = build_ranker_prompt(current, anchors, targets)
             batch_index = self.db.next_post_process_batch_index(conn, scan_id, "ranker")
             started = now_utc()
+            selection = post_processing_model_selection(current)
             metadata_id = self.db.claim_post_process_metadata(
                 conn,
                 scan_id=scan_id,
@@ -772,10 +810,10 @@ class PostProcessor:
                 target_vulnerability_ids=[_int(row["id"]) for row in targets],
                 prompt_template="anchored-ranker",
                 prompt_filled="",
-                model=current["model"],
-                harness=current["harness"],
-                thinking_effort=current.get("thinking_effort"),
-                model_provider=self._model_provider(current),
+                model=selection.model,
+                harness=selection.harness,
+                thinking_effort=selection.thinking_effort,
+                model_provider=selection.model_provider,
                 run_started_at=started,
             )
             conn.commit()
@@ -801,7 +839,7 @@ class PostProcessor:
                 anchors=anchors,
                 targets=targets,
                 rank_run_id=metadata_id,
-                model=current["model"],
+                model=selection.model,
                 prompt_filled=prompt,
             )
             run_time_ms = int((now_utc() - started).total_seconds() * 1000)
@@ -836,17 +874,29 @@ class PostProcessor:
                 conn.commit()
             raise
 
-    def _run_next_post_script_or_complete(self, scan: dict[str, Any], harness) -> bool:
+    def _run_next_post_script_or_complete(
+        self,
+        scan: dict[str, Any],
+        harness,
+        *,
+        allow_complete: bool = True,
+    ) -> bool:
         scan_id = _int(scan["id"])
         with self.db.connect() as conn:
             current = self.db.load_scan(conn, scan_id)
             if not current or current["status"] != "post_processing":
                 return False
-            post_script_ids = configured_post_script_ids(current)
-            if not post_script_ids:
+
+            def complete_if_ready() -> bool:
+                if not allow_complete or self.db.count_running_post_process(conn, scan_id, "ranker"):
+                    return False
                 self.db.set_scan_status_if_current(conn, scan_id, "post_processing", "completed")
                 conn.commit()
                 return True
+
+            post_script_ids = configured_post_script_ids(current)
+            if not post_script_ids:
+                return complete_if_ready()
             rows = conn.execute(
                 "SELECT * FROM public.post_scripts WHERE id = ANY(%s::bigint[])",
                 (post_script_ids,),
@@ -856,9 +906,7 @@ class PostProcessor:
                 scripts_by_id[post_script_id] for post_script_id in post_script_ids if post_script_id in scripts_by_id
             ]
             if not post_scripts:
-                self.db.set_scan_status_if_current(conn, scan_id, "post_processing", "completed")
-                conn.commit()
-                return True
+                return complete_if_ready()
             post_script = None
             row = None
             for candidate_script in post_scripts:
@@ -895,13 +943,12 @@ class PostProcessor:
             if not post_script or not row:
                 if self.db.count_running_post_process(conn, scan_id, "post_script"):
                     return False
-                self.db.set_scan_status_if_current(conn, scan_id, "post_processing", "completed")
-                conn.commit()
-                return True
+                return complete_if_ready()
             prompt_template = post_script["content"]
             if str(post_script.get("name") or "").strip().casefold() == "patched since":
                 prompt_template = patched_since_prompt(prompt_template)
             started = now_utc()
+            selection = post_processing_model_selection(current)
             metadata_id = self.db.claim_post_process_metadata(
                 conn,
                 scan_id=scan_id,
@@ -914,10 +961,10 @@ class PostProcessor:
                 target_vulnerability_ids=[_int(row["id"])],
                 prompt_template=prompt_template,
                 prompt_filled="",
-                model=current["model"],
-                harness=current["harness"],
-                thinking_effort=current.get("thinking_effort"),
-                model_provider=self._model_provider(current),
+                model=selection.model,
+                harness=selection.harness,
+                thinking_effort=selection.thinking_effort,
+                model_provider=selection.model_provider,
                 run_started_at=started,
             )
             conn.commit()

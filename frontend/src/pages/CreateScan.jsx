@@ -1,19 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client.js';
 import { usePageChrome } from '../context/ui.jsx';
 import { Spinner, ErrorState, Button } from '../components/ui.jsx';
 import Markdown from '../components/Markdown.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
-import ModelConfiguration, {
-  modelConfigurationForCatalog,
-  modelConfigurationIsValid,
-} from '../components/ModelConfiguration.jsx';
+import WorkflowModelConfiguration, {
+  workflowModelConfigurationForCatalog,
+  workflowModelConfigurationIsValid,
+} from '../components/WorkflowModelConfiguration.jsx';
 import { configuredModelCatalog, configuredModelProviders, modelCatalogIsReady } from '../lib/modelProviders.js';
+import { modelOverridesEqual, reconcileModelOverrides, workflowDepths } from '../lib/modelOverrides.js';
 import { combineSeverityRanker } from '../lib/severityRanker.js';
 import { defaultRankerIds, defaultWorkflowId } from '../lib/scanPresentation.js';
 import { scanConfigurationDraft } from '../lib/scanDuplication.js';
 import { requiredScanExtraKeys } from '../lib/scanExtras.js';
+import { filterAgentSkills } from '../lib/agentSkillSearch.js';
+import { configuredMaxFiles, localRepoFilePreflight } from '../lib/localRepoFiles.js';
 import { useUnsavedChangesPrompt } from '../lib/useUnsavedChangesPrompt.js';
 import { useModalDialog } from '../lib/useModalDialog.js';
 import { useNewestFirst, usePagination } from '../lib/usePagination.js';
@@ -79,6 +82,7 @@ export default function CreateScan() {
   const [modelCatalogError, setModelCatalogError] = useState(null);
   const [modelCatalogRetryCount, setModelCatalogRetryCount] = useState(0);
   const [rankerPreviewOpen, setRankerPreviewOpen] = useState(false);
+  const [agentSkillQuery, setAgentSkillQuery] = useState('');
   const [form, setForm] = useState({
     workflowId: '',
     postScriptId: '',
@@ -95,6 +99,12 @@ export default function CreateScan() {
     model_provider: '',
     harness: '',
     thinking_effort: 'medium',
+    post_processing_model_override: false,
+    post_processing_model: '',
+    post_processing_model_provider: '',
+    post_processing_harness: '',
+    post_processing_thinking_effort: 'medium',
+    model_overrides: {},
     extra: {},
     rankerIds: [],
     rankerExtra: '', // severity ranker: ordered ranker ids + per-scan custom rules
@@ -104,7 +114,80 @@ export default function CreateScan() {
   const [pendingScan, setPendingScan] = useState(null);
   const [serverErrors, setServerErrors] = useState([]);
   const [dirty, setDirty] = useState(false);
+  const [localRepoFileStats, setLocalRepoFileStats] = useState({
+    repoName: '',
+    status: 'idle',
+    fileCount: null,
+    complete: true,
+    snapshotIssues: [],
+    error: null,
+  });
+  const [localRepoFileStatsRetry, setLocalRepoFileStatsRetry] = useState(0);
   const { allow } = useUnsavedChangesPrompt(dirty || saving);
+
+  useEffect(() => {
+    const repoName = form.repoKind === 'local' ? form.repoLocal : '';
+    if (!repoName) {
+      setLocalRepoFileStats({
+        repoName: '',
+        status: 'idle',
+        fileCount: null,
+        complete: true,
+        snapshotIssues: [],
+        error: null,
+      });
+      return undefined;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    setLocalRepoFileStats({
+      repoName,
+      status: 'loading',
+      fileCount: null,
+      complete: true,
+      snapshotIssues: [],
+      error: null,
+    });
+    api
+      .localRepoStats(repoName, { signal: controller.signal })
+      .then((payload) => {
+        if (!active) return;
+        if (
+          !Number.isSafeInteger(payload?.fileCount) ||
+          payload.fileCount < 0 ||
+          typeof payload.complete !== 'boolean' ||
+          !Array.isArray(payload.snapshotIssues) ||
+          payload.snapshotIssues.some((issue) => !['invalid_symlink', 'special_file'].includes(issue))
+        ) {
+          throw new Error('The local repository file count response was invalid.');
+        }
+        setLocalRepoFileStats({
+          repoName,
+          status: 'ready',
+          fileCount: payload.fileCount,
+          complete: payload.complete,
+          snapshotIssues: [...new Set(payload.snapshotIssues)],
+          error: null,
+        });
+      })
+      .catch((error) => {
+        if (!active || error?.name === 'AbortError') return;
+        setLocalRepoFileStats({
+          repoName,
+          status: 'error',
+          fileCount: null,
+          complete: true,
+          snapshotIssues: [],
+          error,
+        });
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [form.repoKind, form.repoLocal, localRepoFileStatsRetry]);
 
   useEffect(() => {
     const duplicateSourceRequest = duplicateFromId
@@ -151,8 +234,20 @@ export default function CreateScan() {
             modelCatalog,
           });
           setForm((f) => {
-            if (sourceScan) return { ...f, ...scanConfigurationDraft(sourceScan) };
-            const modelConfiguration = modelConfigurationForCatalog(f, configuredProviders, modelCatalog);
+            if (sourceScan) {
+              const duplicateDraft = scanConfigurationDraft(sourceScan);
+              const duplicateWorkflow = workflows.find((workflow) => workflow.id === duplicateDraft.workflowId);
+              return {
+                ...f,
+                ...duplicateDraft,
+                model_overrides: reconcileModelOverrides(
+                  duplicateDraft.model_overrides,
+                  workflowDepths(duplicateWorkflow),
+                  duplicateDraft
+                ),
+              };
+            }
+            const modelConfiguration = workflowModelConfigurationForCatalog(f, configuredProviders, modelCatalog);
             return {
               ...f,
               workflowId: defaultWorkflowId(workflows, params.get('workflow') || ''),
@@ -208,7 +303,7 @@ export default function CreateScan() {
           if (!isDuplicating) {
             setForm((current) => ({
               ...current,
-              ...modelConfigurationForCatalog(current, modelProviders, modelCatalog),
+              ...workflowModelConfigurationForCatalog(current, modelProviders, modelCatalog),
             }));
           }
         })
@@ -226,12 +321,18 @@ export default function CreateScan() {
     if (!activeModelCatalog || isDuplicating) return;
 
     setForm((f) => {
-      const normalized = modelConfigurationForCatalog(f, refData?.modelProviders || [], activeModelCatalog);
+      const normalized = workflowModelConfigurationForCatalog(f, refData?.modelProviders || [], activeModelCatalog);
       if (
         normalized.model === f.model &&
         normalized.model_provider === f.model_provider &&
         normalized.thinking_effort === f.thinking_effort &&
-        normalized.harness === f.harness
+        normalized.post_processing_model_override === f.post_processing_model_override &&
+        normalized.post_processing_model === f.post_processing_model &&
+        normalized.post_processing_model_provider === f.post_processing_model_provider &&
+        normalized.post_processing_harness === f.post_processing_harness &&
+        normalized.post_processing_thinking_effort === f.post_processing_thinking_effort &&
+        normalized.harness === f.harness &&
+        modelOverridesEqual(normalized.model_overrides, f.model_overrides)
       )
         return f;
       return { ...f, ...normalized };
@@ -240,9 +341,14 @@ export default function CreateScan() {
 
   const workflowOptions = useNewestFirst(refData?.workflows);
   const agentSkills = useNewestFirst(refData?.agentSkills);
+  const filteredAgentSkills = useMemo(
+    () => filterAgentSkills(agentSkills, agentSkillQuery),
+    [agentSkillQuery, agentSkills]
+  );
+  const normalizedAgentSkillQuery = agentSkillQuery.trim().toLowerCase();
   const postScripts = useNewestFirst(refData?.postScripts);
   const severityRankers = useNewestFirst(refData?.severityRankers);
-  const agentSkillPages = usePagination(agentSkills, { pageSize: 8 });
+  const agentSkillPages = usePagination(filteredAgentSkills, { pageSize: 8, resetKey: normalizedAgentSkillQuery });
   const postScriptPages = usePagination(postScripts, { pageSize: 8 });
   const rankerPages = usePagination(severityRankers, { pageSize: 8 });
 
@@ -267,6 +373,15 @@ export default function CreateScan() {
     setDirty(true);
     setForm((f) => ({ ...f, extra: { ...f.extra, [key]: value } }));
   };
+  const setWorkflow = (workflowId) => {
+    const workflow = refData.workflows.find((candidate) => candidate.id === workflowId);
+    setDirty(true);
+    setForm((current) => ({
+      ...current,
+      workflowId,
+      model_overrides: reconcileModelOverrides(current.model_overrides, workflowDepths(workflow), current),
+    }));
+  };
 
   // local repos as SearchSelect items (id = folder name)
   const localItems = refData.localRepos.map((r) => ({ id: r.name, ...r }));
@@ -277,6 +392,7 @@ export default function CreateScan() {
   };
 
   const selectedWorkflow = refData.workflows.find((w) => w.id === form.workflowId);
+  const selectedWorkflowDepths = workflowDepths(selectedWorkflow);
   const selectedPostScriptIds = form.postScriptIds?.length
     ? form.postScriptIds
     : form.postScriptId
@@ -285,7 +401,12 @@ export default function CreateScan() {
   const expectedExtra = requiredScanExtraKeys(selectedWorkflow, refData.postScripts, selectedPostScriptIds);
   const modelProviders = refData.modelProviders;
   const hasConfiguredProvider = modelProviders.length > 0;
-  const modelConfigurationValid = modelConfigurationIsValid(form, modelProviders, refData.modelCatalog);
+  const modelConfigurationValid = workflowModelConfigurationIsValid(
+    form,
+    selectedWorkflowDepths,
+    modelProviders,
+    refData.modelCatalog
+  );
   const missingExtra = expectedExtra.filter((k) => !(form.extra[k] && form.extra[k].trim()));
 
   // Severity ranker: concatenate selected rankers' content (in selection order)
@@ -408,6 +529,15 @@ export default function CreateScan() {
       model_provider: form.model_provider,
       harness: form.harness,
       thinking_effort: form.thinking_effort,
+      ...(form.post_processing_model_override
+        ? {
+            post_processing_model: form.post_processing_model,
+            post_processing_model_provider: form.post_processing_model_provider,
+            post_processing_harness: form.post_processing_harness,
+          }
+        : {}),
+      post_processing_thinking_effort: form.post_processing_thinking_effort,
+      model_overrides: form.model_overrides,
       severity_ranker: combinedRanker,
       extra: form.extra,
       jobLimit: form.jobLimit.trim() ? Number(form.jobLimit) : null,
@@ -504,7 +634,7 @@ export default function CreateScan() {
             <SearchSelect
               items={workflowOptions}
               value={form.workflowId}
-              onChange={(id) => set({ workflowId: id })}
+              onChange={setWorkflow}
               placeholder="Search workflows…"
               renderTrigger={(w) => (
                 <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
@@ -606,6 +736,12 @@ export default function CreateScan() {
                   filter={(r, q) => r.name.toLowerCase().includes(q)}
                 />
               </Field>
+              <LocalRepoFilePreflight
+                stats={localRepoFileStats}
+                repoName={form.repoLocal}
+                configuration={form.configuration}
+                onRetry={() => setLocalRepoFileStatsRetry((attempt) => attempt + 1)}
+              />
               <div
                 style={{
                   display: 'flex',
@@ -895,7 +1031,7 @@ export default function CreateScan() {
           {/* ===================== MODEL & HARNESS ===================== */}
           <Label>6 · MODEL &amp; HARNESS</Label>
           <div style={{ marginBottom: 28 }}>
-            <ModelConfiguration
+            <WorkflowModelConfiguration
               value={form}
               onChange={(configuration) => {
                 setDirty(true);
@@ -904,6 +1040,8 @@ export default function CreateScan() {
               providers={modelProviders}
               catalog={refData.modelCatalog}
               catalogError={modelCatalogError}
+              depths={selectedWorkflowDepths}
+              depthChips={selectedWorkflow?.depthChips || []}
             />
           </div>
 
@@ -912,7 +1050,17 @@ export default function CreateScan() {
             7 · AGENT SKILLS{' '}
             <span style={{ textTransform: 'none', letterSpacing: 0, color: 'var(--text-3)' }}>· optional</span>
           </Label>
+          {agentSkills.length > 0 && (
+            <AgentSkillSearchInput
+              value={agentSkillQuery}
+              onChange={setAgentSkillQuery}
+              listId="create-scan-agent-skills"
+            />
+          )}
           <div
+            id="create-scan-agent-skills"
+            role="group"
+            aria-label="Agent skills"
             style={{
               border: '1px solid var(--border)',
               borderRadius: 10,
@@ -1020,13 +1168,20 @@ export default function CreateScan() {
                 </div>
               );
             })}
-            {refData.agentSkills.length === 0 && (
+            {agentSkills.length === 0 && (
               <div style={{ fontSize: 12.5, color: 'var(--text-3)', padding: 13 }}>No agent skills defined.</div>
+            )}
+            {agentSkills.length > 0 && filteredAgentSkills.length === 0 && (
+              <div role="status" aria-live="polite" style={{ fontSize: 12.5, color: 'var(--text-3)', padding: 13 }}>
+                No agent skills match “{agentSkillQuery.trim()}”.
+              </div>
             )}
           </div>
           <Pagination {...agentSkillPages} itemLabel="skills" compact />
           <div className="mono" style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 28 }}>
-            {form.agentSkillIds.length} selected. Selected skills are installed into each executor agent for this scan.
+            {form.agentSkillIds.length} selected.
+            {agentSkillQuery.trim() ? ` ${filteredAgentSkills.length} of ${agentSkills.length} skills match. ` : ' '}
+            Selected skills are installed into each executor agent for this scan.
           </div>
 
           {/* ===================== POST-SCRIPT ===================== */}
@@ -1324,6 +1479,165 @@ export default function CreateScan() {
 }
 
 // ---- small building blocks ----
+export function AgentSkillSearchInput({ value, onChange, listId }) {
+  return (
+    <div style={{ position: 'relative', marginBottom: 8 }}>
+      <Input
+        type="text"
+        role="searchbox"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape') return;
+          event.preventDefault();
+          onChange('');
+        }}
+        aria-label="Search agent skills"
+        aria-controls={listId}
+        autoComplete="off"
+        maxLength={200}
+        placeholder="Search by name, slug, description, or license…"
+        mono
+        style={{ height: 36, paddingRight: value ? 34 : 12 }}
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          aria-label="Clear agent skill search"
+          title="Clear search"
+          style={{
+            position: 'absolute',
+            top: '50%',
+            right: 8,
+            transform: 'translateY(-50%)',
+            width: 24,
+            height: 24,
+            border: 0,
+            borderRadius: 6,
+            background: 'transparent',
+            color: 'var(--text-3)',
+            cursor: 'pointer',
+            fontSize: 16,
+            lineHeight: 1,
+          }}
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function LocalRepoFilePreflight({ stats, repoName, configuration, onRetry }) {
+  const visibleStats = repoName && stats?.repoName !== repoName ? { status: 'loading' } : stats;
+  if (!visibleStats || visibleStats.status === 'idle') return null;
+
+  const panelStyle = {
+    border: '1px solid var(--border)',
+    borderRadius: 9,
+    padding: '11px 12px',
+    marginTop: 9,
+    background: 'var(--surface-2)',
+    fontSize: 12,
+    lineHeight: 1.45,
+  };
+
+  if (visibleStats.status === 'loading') {
+    return (
+      <div role="status" aria-live="polite" className="mono" style={{ ...panelStyle, color: 'var(--text-2)' }}>
+        Counting snapshot files…
+      </div>
+    );
+  }
+
+  if (visibleStats.status === 'error') {
+    return (
+      <div role="status" aria-live="polite" style={{ ...panelStyle, borderColor: 'var(--pend)' }}>
+        <div style={{ color: 'var(--text-2)' }}>
+          Couldn’t count files. You can still create the scan, but the preflight check is unavailable.
+        </div>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="mono"
+          style={{
+            border: 0,
+            background: 'transparent',
+            color: 'var(--accent)',
+            cursor: 'pointer',
+            padding: '5px 0 0',
+            fontSize: 11.5,
+            fontWeight: 600,
+          }}
+        >
+          Retry count
+        </button>
+      </div>
+    );
+  }
+
+  const preflight = localRepoFilePreflight(visibleStats.fileCount, configuredMaxFiles(configuration), {
+    complete: visibleStats.complete,
+  });
+  if (!preflight) return null;
+
+  const overLimit = preflight.kind === 'over_limit';
+  const atLimit = preflight.kind === 'at_limit';
+  const invalidSymlink = visibleStats.snapshotIssues?.includes('invalid_symlink');
+  const specialFile = visibleStats.snapshotIssues?.includes('special_file');
+  const snapshotIncompatible = invalidSymlink || specialFile;
+  const progress =
+    preflight.maxFiles && (preflight.complete || preflight.isOverLimit)
+      ? Math.min(100, Math.max(0, (preflight.fileCount / preflight.maxFiles) * 100))
+      : null;
+  const tone = overLimit || snapshotIncompatible ? 'var(--fail)' : atLimit ? 'var(--pend)' : 'var(--accent)';
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        ...panelStyle,
+        borderColor: overLimit || snapshotIncompatible ? 'var(--fail)' : 'var(--border)',
+        background: overLimit || snapshotIncompatible ? 'var(--fail-bg)' : 'var(--surface-2)',
+      }}
+    >
+      <div
+        className="mono"
+        style={{ color: overLimit || snapshotIncompatible ? 'var(--fail)' : 'var(--text)', fontWeight: 600 }}
+      >
+        {preflight.summary}
+      </div>
+      {progress !== null && (
+        <div
+          data-file-count-progress
+          aria-hidden="true"
+          style={{ height: 4, borderRadius: 999, background: 'var(--border)', overflow: 'hidden', margin: '8px 0' }}
+        >
+          <div style={{ width: `${progress}%`, height: '100%', borderRadius: 999, background: tone }} />
+        </div>
+      )}
+      {snapshotIncompatible && (
+        <div style={{ color: 'var(--fail)', fontWeight: 600, marginTop: progress === null ? 7 : 0 }}>
+          This folder contains{' '}
+          {invalidSymlink && specialFile
+            ? 'absolute or out-of-root symlinks and unsupported special files'
+            : invalidSymlink
+              ? 'one or more absolute or out-of-root symlinks'
+              : 'one or more unsupported special files'}
+          . The engine cannot safely snapshot it, so the scan is expected to fail unless the incompatible entries are
+          removed.
+        </div>
+      )}
+      <div style={{ color: 'var(--text-2)', marginTop: snapshotIncompatible ? 5 : 0 }}>{preflight.detail}</div>
+      <div style={{ color: 'var(--text-3)', fontSize: 10.5, marginTop: 4 }}>
+        This count reflects the folder now; the fixed scan snapshot is taken when the scan starts.
+      </div>
+    </div>
+  );
+}
+
 export function ScanLaunchDialog({ saving = false, onClose, onChoose }) {
   const dialogRef = useModalDialog(onClose);
 

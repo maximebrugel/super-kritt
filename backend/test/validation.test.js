@@ -7,6 +7,7 @@ import {
   validatePostScript,
   validateGeneration,
   validateModelSelection,
+  validateModelOverrides,
   ValidationError,
 } from '../src/lib/validation.js';
 
@@ -168,6 +169,119 @@ test('model selection rejects non-string CLI arguments instead of coercing them'
         error.errors.some((item) => item.field === field && item.message === message)
     );
   }
+});
+
+test('validateScan keeps post-processing thinking effort separate from workflow effort', () => {
+  const base = {
+    workflowId: '1',
+    postScriptId: '1',
+    repo_kind: 'remote',
+    repo_full: 'https://github.com/org/repo',
+    commit_sha: 'HEAD',
+    model: 'test-model',
+    model_provider: 'codex',
+    harness: 'codex',
+    thinking_effort: 'high',
+    severity_ranker: 'Rank by impact.',
+  };
+
+  const valid = validateScan({ ...base, post_processing_thinking_effort: 'medium' });
+
+  assert.equal(valid.thinkingEffort, 'high');
+  assert.equal(valid.postProcessingThinkingEffort, 'medium');
+  assert.deepEqual(valid.postProcessingSelection, {
+    model: 'test-model',
+    modelProvider: 'codex',
+    harness: 'codex',
+    thinkingEffort: 'medium',
+  });
+  assert.equal(validateScan(base).postProcessingThinkingEffort, 'high');
+  assert.throws(
+    () =>
+      validateScan({
+        ...base,
+        model_provider: 'claude',
+        harness: 'claude-code',
+        post_processing_thinking_effort: 'ultra',
+      }),
+    (error) =>
+      error instanceof ValidationError && error.errors.some((item) => item.field === 'post_processing_thinking_effort')
+  );
+
+  const independent = validateScan({
+    ...base,
+    post_processing_model: 'claude-sonnet',
+    post_processing_model_provider: 'claude',
+    post_processing_harness: 'claude-code',
+    post_processing_thinking_effort: 'medium',
+  });
+  assert.equal(independent.postProcessingModelOverride, true);
+  assert.deepEqual(independent.postProcessingSelection, {
+    model: 'claude-sonnet',
+    modelProvider: 'claude',
+    harness: 'claude-code',
+    thinkingEffort: 'medium',
+  });
+});
+
+test('depth model overrides normalize complete tuples and enforce workflow depths', () => {
+  assert.deepEqual(
+    validateModelOverrides(
+      {
+        0: {
+          model: ' gpt-5.6 ',
+          modelProvider: 'CODEX',
+          harness: 'codex-cli',
+          thinkingEffort: 'high',
+        },
+        2: {
+          model: ' anthropic/claude-sonnet ',
+          model_provider: 'openrouter',
+          harness: 'claude-code',
+          thinking_effort: 'medium',
+        },
+      },
+      { allowedDepths: [0, 1, 2] }
+    ),
+    {
+      0: {
+        model: 'gpt-5.6',
+        model_provider: 'codex',
+        harness: 'codex',
+        thinking_effort: 'high',
+      },
+      2: {
+        model: 'anthropic/claude-sonnet',
+        model_provider: 'openrouter',
+        harness: 'claude-code',
+        thinking_effort: 'medium',
+      },
+    }
+  );
+
+  assert.throws(
+    () =>
+      validateModelOverrides(
+        {
+          '01': {
+            model: 'gpt-5.6',
+            model_provider: 'codex',
+            harness: 'codex',
+          },
+          3: {
+            model: 'claude-sonnet',
+            model_provider: 'claude',
+            harness: 'codex',
+          },
+        },
+        { allowedDepths: [0, 1, 2] }
+      ),
+    (error) =>
+      error instanceof ValidationError &&
+      error.errors.some((item) => item.field === 'model_overrides.01') &&
+      error.errors.some((item) => item.field === 'model_overrides.3') &&
+      error.errors.some((item) => item.field === 'model_overrides.3.harness')
+  );
 });
 
 test('validateWorkflow enforces canonical terminal vulnerability field types', () => {
@@ -407,6 +521,29 @@ test('validateScan enforces model provider and harness compatibility after norma
   const kimiCode = validateScan({ ...base, model_provider: 'kimi', harness: 'kimi-code', thinking_effort: 'default' });
   assert.equal(kimiCode.harness, 'kimi-code');
   assert.equal(kimiCode.thinkingEffort, 'default');
+  assert.deepEqual(
+    validateScan({
+      ...base,
+      model_provider: 'codex',
+      harness: 'codex',
+      model_overrides: {
+        1: {
+          model: 'claude-sonnet',
+          model_provider: 'claude',
+          harness: 'claude-code',
+          thinking_effort: 'high',
+        },
+      },
+    }).modelOverrides,
+    {
+      1: {
+        model: 'claude-sonnet',
+        model_provider: 'claude',
+        harness: 'claude-code',
+        thinking_effort: 'high',
+      },
+    }
+  );
 
   for (const [model_provider, harness] of [
     ['codex', 'claude-code'],

@@ -77,6 +77,27 @@ describe('Claude usage bars', () => {
   });
 });
 
+describe('multiple Claude accounts', () => {
+  it('offers another account instead of reconnecting the configured provider', () => {
+    expect(
+      providerActionLabel({
+        id: 'claude',
+        management: 'login',
+        configured: true,
+        accounts: [{ id: 'default', statusKind: 'available' }],
+      })
+    ).toBe('Add Claude account');
+    expect(
+      providerActionLabel({
+        id: 'claude',
+        management: 'login',
+        configured: false,
+        accounts: [],
+      })
+    ).toBe('Add Claude account');
+  });
+});
+
 describe('expired Claude login', () => {
   it('shows the provider authentication error and a same-account login action', () => {
     const html = renderToStaticMarkup(

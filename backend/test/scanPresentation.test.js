@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  activeJobElapsedMs,
+  activeJobRuntimeSelection,
+  activeJobWorkflowDepth,
   cleanError,
   configuredPostScriptIds,
   errorIsFromPreviousRun,
@@ -12,6 +15,86 @@ import {
 } from '../src/lib/repo.js';
 import { serializeScan } from '../src/lib/serialize.js';
 import { SCAN_STATUSES } from '../src/lib/constants.js';
+
+test('active workers expose workflow depth only for workflow steps', () => {
+  assert.equal(activeJobWorkflowDepth({ kind: 'step' }, { depth: 2 }), 2);
+  assert.equal(activeJobWorkflowDepth({}, { depth: 0 }), 0);
+  assert.equal(activeJobWorkflowDepth({ kind: 'post_script' }, { depth: 3 }), null);
+  assert.equal(activeJobWorkflowDepth({ kind: 'step' }, null), null);
+});
+
+test('active worker duration begins at the harness phase instead of the earlier metadata claim', () => {
+  const now = Date.parse('2026-08-02T12:00:00.000Z');
+  const row = {
+    status: 'running',
+    phase: 'running_harness',
+    runStartedAt: new Date('2026-08-02T09:00:00.000Z'),
+    updatedAt: new Date('2026-08-02T11:04:00.000Z'),
+    runTimeMs: 0,
+  };
+
+  assert.equal(activeJobElapsedMs(row, row.phase, now), 56 * 60 * 1000);
+  assert.equal(activeJobElapsedMs({ ...row, phase: 'building_workspace' }, 'building_workspace', now), null);
+  assert.equal(activeJobElapsedMs({ ...row, runTimeMs: 1234 }, 'writing_db', now), 1234);
+});
+
+test('active worker runtime resolves persisted metadata, depth overrides, and scan fallbacks in order', () => {
+  const scan = {
+    model: 'scan-model',
+    modelProvider: 'codex',
+    harness: 'codex',
+    thinkingEffort: 'xhigh',
+    modelOverrides: {
+      2: {
+        model: 'depth-model',
+        model_provider: 'factory',
+        harness: 'droid',
+        thinking_effort: 'max',
+      },
+    },
+  };
+
+  assert.deepEqual(activeJobRuntimeSelection({ kind: 'step' }, { depth: 2 }, scan), {
+    model: 'depth-model',
+    modelProvider: 'factory',
+    harness: 'droid',
+    thinkingEffort: 'max',
+  });
+  assert.deepEqual(activeJobRuntimeSelection({ kind: 'step', model: 'persisted-model' }, { depth: 2 }, scan), {
+    model: 'persisted-model',
+    modelProvider: 'factory',
+    harness: 'droid',
+    thinkingEffort: 'max',
+  });
+});
+
+test('post-processing workers use their recorded runtime or configured fallback', () => {
+  const scan = {
+    model: 'scan-model',
+    modelProvider: 'codex',
+    harness: 'codex',
+    thinkingEffort: 'high',
+    configuration: {
+      post_processing_model: 'post-model',
+      post_processing_model_provider: 'factory',
+      post_processing_harness: 'droid',
+      post_processing_thinking_effort: 'xhigh',
+    },
+  };
+
+  assert.deepEqual(activeJobRuntimeSelection({ kind: 'post_script' }, null, scan), {
+    model: 'post-model',
+    modelProvider: 'factory',
+    harness: 'droid',
+    thinkingEffort: 'xhigh',
+  });
+  assert.deepEqual(activeJobRuntimeSelection({ kind: 'post_script', model: 'persisted-post-model' }, null, scan), {
+    model: 'persisted-post-model',
+    modelProvider: 'factory',
+    harness: 'droid',
+    thinkingEffort: 'xhigh',
+  });
+});
 
 test('lineage summary includes unclaimed fan-out work in the denominator', () => {
   const scan = { configuration: {} };
@@ -103,11 +186,24 @@ test('scan serialization distinguishes raw candidates from listed findings', () 
       commitSha: '4a7dfc2',
       repoScope: 'full',
       dependencies: [],
-      configuration: {},
+      configuration: {
+        post_processing_model: 'gpt-5.6-sol',
+        post_processing_model_provider: 'codex',
+        post_processing_harness: 'codex',
+        post_processing_thinking_effort: 'max',
+      },
       model: 'gpt-5.4',
       modelProvider: 'codex',
       harness: 'codex',
       thinkingEffort: 'xhigh',
+      modelOverrides: {
+        1: {
+          model: 'claude-sonnet',
+          model_provider: 'claude',
+          harness: 'claude-code',
+          thinking_effort: 'high',
+        },
+      },
       status: 'completed',
       agentSkillIds: [],
       insertedAt: new Date(),
@@ -119,6 +215,7 @@ test('scan serialization distinguishes raw candidates from listed findings', () 
       canonicalFindings: 14,
       duplicateFindings: 4,
       exploitable: 8,
+      workflowDepths: [0, 1],
       postScriptName: 'Ease of exploitability',
       postScripts: [
         { id: 4n, name: 'Ease of exploitability' },
@@ -134,6 +231,20 @@ test('scan serialization distinguishes raw candidates from listed findings', () 
   assert.equal(serialized.exploitable, 8);
   assert.deepEqual(serialized.postScriptNames, ['Ease of exploitability', 'Patched since', 'Resource exhaustion']);
   assert.equal(serialized.postScripts[0].primary, true);
+  assert.deepEqual(serialized.workflowDepths, [0, 1]);
+  assert.equal(serialized.postProcessingModelOverride, true);
+  assert.equal(serialized.postProcessingModel, 'gpt-5.6-sol');
+  assert.equal(serialized.postProcessingModelProvider, 'codex');
+  assert.equal(serialized.postProcessingHarness, 'codex');
+  assert.equal(serialized.postProcessingThinkingEffort, 'max');
+  assert.deepEqual(serialized.modelOverrides, {
+    1: {
+      model: 'claude-sonnet',
+      modelProvider: 'claude',
+      harness: 'claude-code',
+      thinkingEffort: 'high',
+    },
+  });
 });
 
 test('scan serialization exposes durable logical-job limits and resume boundaries', () => {
@@ -209,14 +320,18 @@ test('provider failure presentation preserves safe retry history and identifies 
   assert.equal(cleanError(message), message);
 });
 
-test('provider throttling and account quota exhaustion remain distinct', () => {
+test('provider throttling, subagent limits, and account quota exhaustion remain distinct', () => {
   const providerThrottle =
     'The model provider temporarily throttled this request because of server demand. ' +
     'This is not the account usage quota. Diagnostic: provider_throttled.';
   const accountQuota =
     'The model provider reports that this account reached its usage quota. ' + 'Diagnostic: account_quota_limited.';
+  const subagentLimit =
+    'Codex reached a separate premium limit while starting a subagent. Diagnostic: subagent_limited.';
 
   assert.equal(knownError(providerThrottle)?.title, 'Provider busy');
+  assert.equal(knownError(subagentLimit)?.title, 'Subagent limit reached');
+  assert.equal(knownError(subagentLimit)?.fixLinks, undefined);
   assert.equal(knownError(accountQuota)?.title, 'Account quota exhausted');
   assert.deepEqual(knownError(accountQuota)?.fixLinks, [
     { label: 'View usage and limits in Accounts', url: '/accounts', internal: true },
@@ -229,9 +344,7 @@ test('Claude reconnect failures link directly to Accounts', () => {
     'Reconnect Claude in Accounts.';
 
   assert.equal(knownError(message)?.title, 'Claude sign-in required');
-  assert.deepEqual(knownError(message)?.fixLinks, [
-    { label: 'Open Accounts', url: '/accounts', internal: true },
-  ]);
+  assert.deepEqual(knownError(message)?.fixLinks, [{ label: 'Open Accounts', url: '/accounts', internal: true }]);
 });
 
 test('workspace disk exhaustion renders an actionable engine error', () => {
@@ -243,6 +356,18 @@ test('workspace disk exhaustion renders an actionable engine error', () => {
     'Engine storage full. The scanner ran out of disk space while creating a job workspace. ' +
       'Free local disk space, then resume the scan.'
   );
+});
+
+test('low-storage warning persistence failures explain the pause bug', () => {
+  const message = 'psycopg.errors.InvalidParameterValue: cannot set path in scalar';
+
+  assert.equal(knownError(message)?.title, 'Low-storage pause failed');
+  assert.equal(
+    cleanError(message),
+    'Low-storage pause failed. The engine ran low on disk space, then could not save its automatic pause warning. ' +
+      'Free disk space, lower Minimum free storage, or enable Ignore low-storage safeguard in Settings, then resume the scan; completed work is preserved.'
+  );
+  assert.deepEqual(knownError(message)?.fixLinks, [{ label: 'Open Settings', url: '/settings', internal: true }]);
 });
 
 test('cyber policy diagnostics render the actionable provider cause', () => {

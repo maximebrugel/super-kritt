@@ -78,6 +78,7 @@ describe('provider account API', () => {
     }
 
     expect(request.url).toBe('/api/accounts/provider/claude?refresh=1');
+    expect(request.options.cache).toBe('no-store');
   });
 
   it('encodes account identifiers in the removal request', async () => {
@@ -195,5 +196,49 @@ describe('scan lifecycle API', () => {
     }
     expect(request.url).toBe('/api/scans/58');
     expect(request.options.method).toBe('DELETE');
+  });
+});
+
+describe('workflow lifecycle API', () => {
+  it('deletes a workflow with DELETE', async () => {
+    const originalFetch = globalThis.fetch;
+    let request;
+    globalThis.fetch = async (url, options) => {
+      request = { url, options };
+      return { ok: true, status: 204, json: async () => ({}) };
+    };
+    try {
+      await api.deleteWorkflow('27');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(request.url).toBe('/api/workflows/27');
+    expect(request.options.method).toBe('DELETE');
+  });
+});
+
+describe('local repository API', () => {
+  it('encodes the repository name when requesting file stats', async () => {
+    const originalFetch = globalThis.fetch;
+    const signal = new AbortController().signal;
+    let request;
+    globalThis.fetch = async (url, options) => {
+      request = { url, options };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ name: 'working tree #1', fileCount: 42, complete: true, snapshotIssues: [] }),
+      };
+    };
+
+    try {
+      await api.localRepoStats('working tree #1', { signal });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(request.url).toBe('/api/local-repos/working%20tree%20%231/stats');
+    expect(request.options.method).toBeUndefined();
+    expect(request.options.signal).toBe(signal);
   });
 });

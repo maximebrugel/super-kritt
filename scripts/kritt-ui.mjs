@@ -126,26 +126,39 @@ export function renderMenuScreen({
   colorEnabled = false,
 }) {
   const innerWidth = Math.max(20, width - 4);
-  const lines = screenHeader({ title, subtitle, width, colorEnabled });
+  const header = screenHeader({ title, subtitle, width, colorEnabled });
 
-  for (const detail of details) {
+  const detailLines = details.map((detail) => {
     const text = typeof detail === 'string' ? detail : detail.text;
     const tone = typeof detail === 'string' ? null : detail.tone;
     const rendered = truncate(text, innerWidth);
-    lines.push(`  ${tone ? color(rendered, ANSI[tone], colorEnabled) : rendered}`);
-  }
-  if (details.length) lines.push('');
+    return `  ${tone ? color(rendered, ANSI[tone], colorEnabled) : rendered}`;
+  });
 
-  for (const [index, option] of options.entries()) {
+  const optionLines = options.map((option, index) => {
     const active = index === selected;
     const marker = active ? '›' : ' ';
     const description = option.description ? `  ${option.description}` : '';
     const text = truncate(`${marker} ${option.label}${description}`, innerWidth);
-    lines.push(`  ${active ? color(text, ANSI.accent, colorEnabled) : text}`);
-  }
+    return `  ${active ? color(text, ANSI.accent, colorEnabled) : text}`;
+  });
 
-  lines.push('');
-  lines.push(`  ${color(truncate(footer, innerWidth), ANSI.dim, colorEnabled)}`);
+  const footerLine = `  ${color(truncate(footer, innerWidth), ANSI.dim, colorEnabled)}`;
+
+  // The options list (with the selection cursor) and the footer are required to
+  // operate the menu and must never be pushed off-screen by a short terminal.
+  // Details are informational status only - the same state is already echoed in
+  // each option's description - so they are the first thing trimmed when space
+  // is tight.
+  const targetRows = Math.max(12, rows || 24);
+  const requiredRows = header.length + optionLines.length + 2; // blank line + footer
+  const detailBudget = Math.max(0, targetRows - requiredRows);
+  const shownDetails = detailLines.slice(0, detailBudget);
+
+  const lines = [...header, ...shownDetails];
+  if (shownDetails.length) lines.push('');
+  lines.push(...optionLines, '', footerLine);
+
   return fillScreen(lines, { rows });
 }
 

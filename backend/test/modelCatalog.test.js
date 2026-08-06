@@ -120,6 +120,12 @@ test('model catalog helpers sanitize cached models and report input readiness', 
               isDefault: false,
             },
             {
+              id: 'claude-opus-5',
+              label: 'Opus 5',
+              thinkingEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+              isDefault: false,
+            },
+            {
               id: 'claude-opus-4-8',
               label: 'Opus 4.8',
               thinkingEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -147,7 +153,7 @@ test('model catalog helpers sanitize cached models and report input readiness', 
           defaultModel: 'claude-sonnet-5',
           status: 'ready',
         },
-        { provider: 'openrouter', input: 'text', models: [], defaultModel: null, status: 'ready' },
+        { provider: 'openrouter', input: 'text', models: [], defaultModel: null, status: 'loading' },
       ],
     }
   );
@@ -181,6 +187,7 @@ test('cached model lookup identifies exact catalog entries', () => {
   assert.equal(isCachedModel('codex', 'other-model', catalog), false);
   assert.equal(isCachedModel('claude', 'claude-sonnet-5', null), true);
   assert.equal(isCachedModel('claude', 'claude-fable-5', null), true);
+  assert.equal(isCachedModel('claude', 'claude-opus-5', null), true);
   assert.equal(isCachedModel('claude', 'claude-opus-4-8', null), true);
   assert.equal(isCachedModel('claude', 'claude-sonnet-4', null), false);
   assert.equal(isCachedModel('openrouter', 'any/provider-model', null), false);
@@ -212,6 +219,54 @@ test('a last refresh error retains a previously valid cached catalog', () => {
   assert.equal(isCachedModel('codex', 'gpt-5-codex', catalog), true);
 });
 
+test('OpenRouter exposes cached suggestions while keeping free-text input', () => {
+  const catalog = {
+    provider: 'openrouter',
+    models: [
+      {
+        id: ' vendor/code-model ',
+        label: ' Code Model ',
+        thinkingEfforts: ['default', 'medium', 'unsupported', 'medium'],
+      },
+      { id: 'vendor/backup-model', thinking_efforts: ['low', 'high'] },
+    ],
+    defaultModel: 'vendor/code-model',
+    lastError: 'the latest refresh failed',
+  };
+
+  assert.deepEqual(buildModelCatalogResponse(['openrouter'], [catalog]), {
+    providers: [
+      {
+        provider: 'openrouter',
+        input: 'text',
+        models: [
+          {
+            id: 'vendor/code-model',
+            label: 'Code Model',
+            thinkingEfforts: ['default', 'medium'],
+            isDefault: true,
+          },
+          {
+            id: 'vendor/backup-model',
+            label: 'vendor/backup-model',
+            thinkingEfforts: ['low', 'high'],
+            isDefault: false,
+          },
+        ],
+        defaultModel: 'vendor/code-model',
+        status: 'ready',
+      },
+    ],
+  });
+  assert.equal(isCachedModel('openrouter', 'vendor/code-model', catalog), true);
+  assert.equal(isCachedModel('openrouter', 'custom/not-in-catalog', catalog), false);
+  assert.equal(
+    buildModelCatalogResponse(['openrouter'], [{ provider: 'openrouter', models: [], lastError: 'refresh failed' }])
+      .providers[0].status,
+    'unavailable'
+  );
+});
+
 test('model catalog endpoint returns only configured providers', async () => {
   let requestedCatalogProviders;
   const router = createModelCatalogRouter({
@@ -223,6 +278,11 @@ test('model catalog endpoint returns only configured providers', async () => {
           provider: 'codex',
           models: [{ id: 'gpt-5-codex', label: 'GPT-5 Codex', thinkingEfforts: ['medium'] }],
           defaultModel: 'gpt-5-codex',
+        },
+        {
+          provider: 'openrouter',
+          models: [{ id: 'vendor/code-model', label: 'Code Model', thinkingEfforts: ['default', 'high'] }],
+          defaultModel: 'vendor/code-model',
         },
       ];
     },
@@ -247,7 +307,20 @@ test('model catalog endpoint returns only configured providers', async () => {
         defaultModel: 'gpt-5-codex',
         status: 'ready',
       },
-      { provider: 'openrouter', input: 'text', models: [], defaultModel: null, status: 'ready' },
+      {
+        provider: 'openrouter',
+        input: 'text',
+        models: [
+          {
+            id: 'vendor/code-model',
+            label: 'Code Model',
+            thinkingEfforts: ['default', 'high'],
+            isDefault: true,
+          },
+        ],
+        defaultModel: 'vendor/code-model',
+        status: 'ready',
+      },
     ],
   });
 });

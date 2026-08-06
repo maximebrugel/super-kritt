@@ -30,7 +30,8 @@ NON_RETRYABLE_HARNESS_FAILURES = frozenset(
         "start_failed",
     }
 )
-RETRYABLE_RATE_LIMIT_FAILURES = frozenset({"rate_limited", "provider_throttled", "account_quota_limited"})
+CAPACITY_RATE_LIMIT_FAILURES = frozenset({"provider_throttled", "subagent_limited"})
+RETRYABLE_RATE_LIMIT_FAILURES = frozenset({"rate_limited", "account_quota_limited", *CAPACITY_RATE_LIMIT_FAILURES})
 
 HARNESS_FAILURE_MESSAGES = {
     "auth_failed": (
@@ -69,6 +70,10 @@ HARNESS_FAILURE_MESSAGES = {
     "account_quota_limited": (
         "The model provider reports that this account reached its usage quota. "
         "Wait for the quota window to reset or use another account."
+    ),
+    "subagent_limited": (
+        "Codex reached a separate premium limit while starting a subagent. "
+        "The account's normal usage quota may still be available; retry with less parallel work."
     ),
     "quota_exceeded": (
         "The model provider reports that the account quota is exhausted. Check the provider account and try again."
@@ -377,6 +382,19 @@ def _retry_after_seconds(output: str) -> float | None:
     if seconds:
         return max(0.0, float(seconds.group(1)))
 
+    retry_at_text = re.search(
+        r"(?i)\btry again at\s+([a-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,\s+\d{4}\s+\d{1,2}:\d{2}\s+[ap]m)",
+        output or "",
+    )
+    if retry_at_text:
+        normalized = re.sub(r"(?i)(\d)(?:st|nd|rd|th)\b", r"\1", retry_at_text.group(1))
+        for date_format in ("%b %d, %Y %I:%M %p", "%B %d, %Y %I:%M %p"):
+            try:
+                retry_at = datetime.strptime(normalized, date_format).replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except ValueError:
+                continue
+
     header = re.search(r"(?im)^retry-after\s*:\s*([^\r\n]+)", output or "")
     if not header:
         return None
@@ -453,7 +471,7 @@ def _classify_harness_output(output: str, *, provider: str | None = None) -> str
         )
     ):
         return "provider_throttled"
-    if any(
+    account_limit_signal = any(
         value in normalized
         for value in (
             "usage_limit",
@@ -462,7 +480,21 @@ def _classify_harness_output(output: str, *, provider: str | None = None) -> str
             "you have hit your limit",
             "key limit exceeded (total limit)",
         )
-    ):
+    )
+    subagent_limit_signal = any(
+        value in normalized
+        for value in (
+            '"limit_id":"premium"',
+            '"limit_id": "premium"',
+            "agent errored:",
+            "this agent's turn failed",
+            '"agent_status":{"errored"',
+            '"agent_status": {"errored"',
+        )
+    )
+    if account_limit_signal and subagent_limit_signal:
+        return "subagent_limited"
+    if account_limit_signal:
         return "account_quota_limited"
     rate_limit_signal = any(
         value in normalized
@@ -769,7 +801,13 @@ def _container_path(value: str, *, repo_dir: str, home: str) -> str:
     return value
 
 
-def _scan_docker_command(cmd: list[str], repo_dir: str, env: dict[str, str]) -> list[str]:
+def _scan_docker_command(
+    cmd: list[str],
+    repo_dir: str,
+    env: dict[str, str],
+    *,
+    runner_image: str | None = None,
+) -> list[str]:
     """Run a tool-enabled harness in a per-job network and mount namespace."""
 
     docker = shutil.which(os.getenv("ENGINE_DOCKER_BIN", "docker"))
@@ -782,9 +820,9 @@ def _scan_docker_command(cmd: list[str], repo_dir: str, env: dict[str, str]) -> 
     if not home:
         raise HarnessError("Isolated scan runner requires HOME in the job environment", code="configuration_error")
 
-    workspace_host = _host_path_for_engine_data_path(repo_dir)
     home_host = _host_path_for_engine_data_path(home)
-    image = os.getenv("ENGINE_SCAN_RUNNER_IMAGE", "open-kritt-engine:local")
+    workspace_host = None if runner_image else _host_path_for_engine_data_path(repo_dir)
+    image = runner_image or os.getenv("ENGINE_SCAN_RUNNER_IMAGE", "open-kritt-engine:local")
     user = "0:0"
     container_name = _docker_container_name(repo_dir)
     network = f"{SCAN_SANDBOX_NETWORK_PREFIX}{container_name.removeprefix('open-kritt-scan-')}"[:63].rstrip("-.")
@@ -823,8 +861,6 @@ def _scan_docker_command(cmd: list[str], repo_dir: str, env: dict[str, str]) -> 
         "NODE_EXTRA_CA_CERTS",
     ]
 
-    workspace_mount = f"type=bind,src={workspace_host},dst={CLAUDE_RUNNER_WORKDIR}"
-
     docker_cmd = [
         docker,
         "run",
@@ -845,13 +881,22 @@ def _scan_docker_command(cmd: list[str], repo_dir: str, env: dict[str, str]) -> 
         CLAUDE_RUNNER_WORKDIR,
         "--pids-limit",
         "512",
-        "--mount",
-        workspace_mount,
-        "--mount",
-        f"type=bind,src={home_host},dst={CLAUDE_RUNNER_HOME}",
-        "--tmpfs",
-        "/tmp:rw,nosuid,nodev,size=1g",
     ]
+    if workspace_host is not None:
+        docker_cmd.extend(
+            [
+                "--mount",
+                f"type=bind,src={workspace_host},dst={CLAUDE_RUNNER_WORKDIR}",
+            ]
+        )
+    docker_cmd.extend(
+        [
+            "--mount",
+            f"type=bind,src={home_host},dst={CLAUDE_RUNNER_HOME}",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=1g",
+        ]
+    )
     for key, value in container_env.items():
         docker_cmd.extend(["--env", f"{key}={value}"])
     for key in inherited_env:
@@ -1357,6 +1402,7 @@ def codex_exec_command(
     thinking_effort: str | None,
     allow_tools: bool,
     codex_model_provider: str | None = None,
+    max_subagents: int | None = None,
 ) -> list[str]:
     """Build a Codex exec command while preserving scan-mode compatibility."""
 
@@ -1373,6 +1419,8 @@ def codex_exec_command(
     command.extend(["exec", "--json", "-C", repo_dir, "-m", model])
     if allow_tools:
         command.append("--dangerously-bypass-approvals-and-sandbox")
+        if max_subagents is not None:
+            command.extend(["-c", f"agents.max_concurrent_threads_per_session={max_subagents}"])
     else:
         command.extend(
             [
@@ -1412,11 +1460,13 @@ class CodexHarness:
         model_provider: str | None = None,
         cli_gate=None,
         codex_model_provider: str | None = None,
+        max_subagents: int = 5,
     ):
         self.timeout_seconds = timeout_seconds
         self.model_provider = model_provider
         self.codex_model_provider = codex_model_provider
         self.cli_gate = cli_gate
+        self.max_subagents = max(1, min(int(max_subagents), 5))
 
     def run(
         self,
@@ -1428,10 +1478,11 @@ class CodexHarness:
         thinking_effort: str | None = None,
         env: dict[str, str] | None = None,
         allow_tools: bool = True,
+        runner_image: str | None = None,
     ) -> HarnessResult:
         usage = self.cli_gate.use() if self.cli_gate is not None else nullcontext()
         with usage:
-            return self._run(prompt, schema, repo_dir, model, thinking_effort, env, allow_tools)
+            return self._run(prompt, schema, repo_dir, model, thinking_effort, env, allow_tools, runner_image)
 
     def _run(
         self,
@@ -1442,6 +1493,7 @@ class CodexHarness:
         thinking_effort: str | None,
         env: dict[str, str] | None,
         allow_tools: bool,
+        runner_image: str | None,
     ) -> HarnessResult:
         actual_env = env if env is not None else _base_env()
         temp_parent = actual_env.get("HOME")
@@ -1462,9 +1514,14 @@ class CodexHarness:
                 codex_model_provider=self.codex_model_provider,
                 thinking_effort=thinking_effort,
                 allow_tools=allow_tools,
+                max_subagents=self.max_subagents if allow_tools else None,
             )
             if allow_tools:
-                cmd = _scan_docker_command(cmd, repo_dir, actual_env)
+                cmd = (
+                    _scan_docker_command(cmd, repo_dir, actual_env, runner_image=runner_image)
+                    if runner_image
+                    else _scan_docker_command(cmd, repo_dir, actual_env)
+                )
             started_at = time.time()
             proc = _run_process(cmd, prompt, repo_dir, self.timeout_seconds, env=actual_env)
             output_files = {}
@@ -1502,6 +1559,7 @@ class CodexHarness:
                             model=model,
                             thinking_effort=thinking_effort,
                             env=actual_env,
+                            runner_image=runner_image,
                         )
                         parsed_payload = resume_result.payload
                         usage = resume_result.usage or usage
@@ -1549,6 +1607,7 @@ class CodexHarness:
         model: str,
         thinking_effort: str | None,
         env: dict[str, str],
+        runner_image: str | None = None,
     ) -> HarnessResult:
         cmd = [
             "codex",
@@ -1558,6 +1617,8 @@ class CodexHarness:
             "-m",
             model,
             "--dangerously-bypass-approvals-and-sandbox",
+            "-c",
+            f"agents.max_concurrent_threads_per_session={self.max_subagents}",
             "-o",
             output_path,
         ]
@@ -1571,7 +1632,11 @@ class CodexHarness:
         if thinking_effort and thinking_effort != "default":
             cmd.extend(["-c", f'model_reasoning_effort="{thinking_effort}"'])
         cmd.extend([session_id, "-"])
-        cmd = _scan_docker_command(cmd, repo_dir, env)
+        cmd = (
+            _scan_docker_command(cmd, repo_dir, env, runner_image=runner_image)
+            if runner_image
+            else _scan_docker_command(cmd, repo_dir, env)
+        )
         started_at = time.time()
         proc = _run_process(cmd, _resume_json_prompt(schema), repo_dir, self.timeout_seconds, env=env)
         output_files = {}
@@ -1630,6 +1695,7 @@ class ClaudeHarness:
         thinking_effort: str | None = None,
         env: dict[str, str] | None = None,
         allow_tools: bool = True,
+        runner_image: str | None = None,
     ) -> HarnessResult:
         base_env = env if env is not None else _base_env()
         provider = claude_model_provider(model, base_env, self.model_provider)
@@ -1664,7 +1730,15 @@ class ClaudeHarness:
             cmd.extend(["--include-partial-messages", "--verbose"])
         if thinking_effort and thinking_effort != "default":
             cmd.extend(["--effort", thinking_effort])
-        run_cmd = _scan_docker_command(cmd, repo_dir, actual_env) if allow_tools else cmd
+        run_cmd = (
+            (
+                _scan_docker_command(cmd, repo_dir, actual_env, runner_image=runner_image)
+                if runner_image
+                else _scan_docker_command(cmd, repo_dir, actual_env)
+            )
+            if allow_tools
+            else cmd
+        )
         timeout_seconds = self.timeout_seconds
         if not gateway:
             timeout_seconds = claude_oauth_timeout_seconds(
@@ -1759,6 +1833,7 @@ class CursorHarness:
         thinking_effort: str | None = None,
         env: dict[str, str] | None = None,
         allow_tools: bool = True,
+        runner_image: str | None = None,
     ) -> HarnessResult:
         if not allow_tools:
             raise HarnessError(
@@ -1784,7 +1859,11 @@ class CursorHarness:
             repo_dir,
             "Read the full task from standard input, complete it in this workspace, and return only the requested structured JSON.",
         ]
-        cmd = _scan_docker_command(cmd, repo_dir, actual_env)
+        cmd = (
+            _scan_docker_command(cmd, repo_dir, actual_env, runner_image=runner_image)
+            if runner_image
+            else _scan_docker_command(cmd, repo_dir, actual_env)
+        )
         proc = _run_process(cmd, prompt, repo_dir, self.timeout_seconds, env=actual_env)
         process_output = _process_output(proc)
         try:
@@ -1923,6 +2002,7 @@ def harness_for(
     model_provider: str | None = None,
     codex_model_provider: str | None = None,
     codex_cli_gate=None,
+    codex_max_subagents: int = 5,
 ):
     normalized = normalize_harness_name(name)
     provider = model_provider if model_provider is not None else codex_model_provider
@@ -1932,6 +2012,7 @@ def harness_for(
             model_provider=model_provider,
             cli_gate=codex_cli_gate,
             codex_model_provider=codex_model_provider,
+            max_subagents=codex_max_subagents,
         )
     if normalized == "claude-code":
         return ClaudeHarness(timeout_seconds, provider)
