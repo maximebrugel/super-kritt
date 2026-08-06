@@ -39,6 +39,7 @@ RESERVED_WORKSPACE_ENTRIES = {"WORKSPACE.json", "WORKSPACE.md"}
 LOGGER = logging.getLogger("open_kritt_engine.workspace")
 SCAN_RUNNER_WORKDIR = "/workspace"
 SELECTED_AGENT_SKILLS_SLUG = "open-kritt-selected-skills"
+BUNDLED_AGENT_SKILLS_DIR = Path(__file__).with_name("bundled_agent_skills")
 OPENROUTER_CODEX_BASE_URL = "https://openrouter.ai/api/v1"
 JOB_UID_BASE = 100_000
 JOB_UID_SPAN = 2_000_000_000
@@ -106,6 +107,7 @@ def prepare_job_workspace(
     needs_codex_home = selected_harness == "codex"
     needs_claude_home = selected_harness == "claude-code"
     needs_kimi_home = selected_harness == "kimi-code"
+    needs_cursor_home = selected_harness == "cursor"
     codex_source = (
         provider_home_for_job("codex", metadata_id, data_dir=data_dir)
         if needs_codex_home and selected_provider == "codex"
@@ -139,6 +141,10 @@ def prepare_job_workspace(
         _install_agent_skills(codex_home, agent_skills or [])
     if needs_claude_home:
         _install_agent_skills(claude_home, agent_skills or [])
+    if needs_kimi_home:
+        _install_agent_skills(home / ".kimi-code", agent_skills or [])
+    if needs_cursor_home:
+        _install_agent_skills(home / ".cursor", agent_skills or [])
     job_uid, job_gid = _job_identity(metadata_id)
     env = job_environment(selected_provider, selected_harness)
     env.update(
@@ -1349,8 +1355,12 @@ def _install_agent_skills(codex_home: Path, agent_skills: list[dict[str, Any]]):
     for skill in agent_skills:
         slug = _skill_slug(skill)
         target = skills_dir / slug
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(_skill_markdown(skill, slug), encoding="utf-8")
+        bundled = BUNDLED_AGENT_SKILLS_DIR / slug
+        if bundled.is_dir():
+            shutil.copytree(bundled, target, dirs_exist_ok=True)
+        else:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "SKILL.md").write_text(_skill_markdown(skill, slug), encoding="utf-8")
     bundle = skills_dir / SELECTED_AGENT_SKILLS_SLUG
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / "SKILL.md").write_text(_selected_agent_skills_markdown(agent_skills), encoding="utf-8")

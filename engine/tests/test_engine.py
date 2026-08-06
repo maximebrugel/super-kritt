@@ -426,6 +426,41 @@ def test_native_agent_skills_prompt_invokes_installed_bundle():
     assert "Trace attacker input" not in codex_prompt
 
 
+@pytest.mark.parametrize(
+    ("harness_name", "skills_home"),
+    [
+        ("codex", ".codex"),
+        ("claude-code", ".claude"),
+        ("kimi-code", ".kimi-code"),
+        ("cursor", ".cursor"),
+    ],
+)
+def test_job_workspace_installs_bundled_skill_without_cropping(tmp_path, harness_name, skills_home):
+    workspace = prepare_job_workspace(
+        str(tmp_path / harness_name),
+        1,
+        agent_skills=[{"slug": "out-of-the-box", "content": "Read the complete installed skill."}],
+        harness_name=harness_name,
+        model_provider="openrouter",
+    )
+
+    source = workspace_module.BUNDLED_AGENT_SKILLS_DIR / "out-of-the-box"
+    target = Path(workspace.env["HOME"]) / skills_home / "skills" / "out-of-the-box"
+    source_files = sorted(path.relative_to(source) for path in source.rglob("*") if path.is_file())
+    target_files = sorted(path.relative_to(target) for path in target.rglob("*") if path.is_file())
+
+    assert target_files == source_files
+    assert source_files == [
+        Path("LICENSE"),
+        Path("README.md"),
+        Path("SKILL.md"),
+        Path("references/auditvault-evidence.md"),
+        Path("references/exploit-playbooks.md"),
+    ]
+    for relative_path in source_files:
+        assert (target / relative_path).read_bytes() == (source / relative_path).read_bytes()
+
+
 def test_dependency_alias_falls_back_when_repo_name_collides(tmp_path):
     repo_dir = tmp_path / "workspace"
     repo_dir.mkdir()
