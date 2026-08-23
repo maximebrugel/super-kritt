@@ -1,3 +1,4 @@
+import errno
 import json
 import shutil
 import subprocess
@@ -721,6 +722,36 @@ def test_prewarm_scan_checkout_cache_only_populates_cache(monkeypatch, tmp_path)
     assert all(str(tmp_path / "cache") in call[2] for call in calls)
     assert manifest["primary"]["commit"] == "commit-repo"
     assert manifest["dependencies"][0]["commit"] == "commit-agave"
+
+
+def test_checkout_cache_falls_back_when_configured_cache_is_read_only(monkeypatch, tmp_path):
+    configured_cache = tmp_path / "configured-cache"
+    configured_cache.mkdir()
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("ENGINE_DATA_DIR", str(data_dir))
+    calls = []
+
+    def fake_checkout_repo(repo_full, commit_sha, base_dir, github_token=None):
+        base_path = Path(base_dir)
+        calls.append(base_path)
+        if configured_cache in base_path.parents:
+            raise OSError(errno.EROFS, "Read-only file system", base_path)
+        path = base_path / repo_full.replace("/", "__")
+        path.mkdir(parents=True)
+        (path / ".git").mkdir()
+        (path / "repo.txt").write_text(repo_full, encoding="utf-8")
+        return str(path), "commit-repo"
+
+    monkeypatch.setattr(workspace_module, "checkout_repo", fake_checkout_repo)
+    monkeypatch.setattr(workspace_module, "_git_head_commit", fake_cache_git_head)
+
+    manifest = prewarm_scan_checkout_cache(checkout_cache_dir=str(configured_cache), scan=scan())
+
+    fallback = data_dir / workspace_module.CHECKOUT_CACHE_FALLBACK_DIRNAME
+    assert calls[0] == configured_cache / "owner__repo@HEAD"
+    assert calls[1] == fallback / "owner__repo@HEAD"
+    assert Path(manifest["primary"]["cache_path"]).is_relative_to(fallback)
+    assert manifest["primary"]["commit"] == "commit-repo"
 
 
 def test_ready_checkout_cache_skips_fetch_and_uses_shared_clone(monkeypatch, tmp_path):
@@ -1918,6 +1949,43 @@ def test_job_workspace_rotates_between_configured_codex_homes(monkeypatch, tmp_p
     assert (Path(workspace_3.env["CODEX_HOME"]) / "auth.json").read_text(encoding="utf-8") == '{"account":"a"}'
 
 
+def test_job_workspace_copies_configured_grok_login_auth(monkeypatch, tmp_path):
+    monkeypatch.delenv("ENGINE_RUNTIME_CONFIG_PATH", raising=False)
+    from open_kritt_engine.workspace import _configured_grok_homes
+
+    home_a = tmp_path / "grok-accounts" / "primary" / ".grok"
+    home_b = tmp_path / "grok-accounts" / "secondary" / ".grok"
+    home_a.mkdir(parents=True)
+    home_b.mkdir(parents=True)
+    (home_a / "auth.json").write_text('{"email":"a@example.test"}', encoding="utf-8")
+    (home_b / "auth.json").write_text('{"email":"b@example.test"}', encoding="utf-8")
+    (home_a / "config.toml").write_text("[hooks]\nenabled = true\n", encoding="utf-8")
+    (home_a / "trusted_folders.toml").write_text('folders = ["/workspace"]\n', encoding="utf-8")
+    (home_a / "hooks").mkdir()
+    (home_a / "hooks" / "pre-tool.sh").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    monkeypatch.setenv("ENGINE_GROK_HOME", f"{home_a},{home_b}")
+
+    workspace_1 = prepare_job_workspace(str(tmp_path / "data"), 1, model_provider="xai", harness_name="grok-build")
+    workspace_2 = prepare_job_workspace(str(tmp_path / "data"), 2, model_provider="xai", harness_name="grok-build")
+
+    assert _configured_grok_homes() == [str(home_a), str(home_b)]
+    assert workspace_1.provider_account_provider == "xai"
+    assert workspace_1.provider_account_home == str(home_a)
+    assert workspace_1.provider_account_email == "a@example.test"
+    assert (Path(workspace_1.env["GROK_HOME"]) / "auth.json").read_text(encoding="utf-8") == (
+        '{"email":"a@example.test"}'
+    )
+    assert (Path(workspace_2.env["GROK_HOME"]) / "auth.json").read_text(encoding="utf-8") == (
+        '{"email":"b@example.test"}'
+    )
+    copied_files = {
+        path.relative_to(workspace_1.env["GROK_HOME"]).as_posix()
+        for path in Path(workspace_1.env["GROK_HOME"]).rglob("*")
+        if path.is_file()
+    }
+    assert copied_files == {"auth.json"}
+
+
 def test_claude_rotation_reloads_live_account_list_without_engine_restart(monkeypatch, tmp_path):
     monkeypatch.delenv("ENGINE_RUNTIME_CONFIG_PATH", raising=False)
     data_dir = tmp_path / "data"
@@ -1947,17 +2015,21 @@ def test_claude_rotation_reloads_live_account_list_without_engine_restart(monkey
     assert provider_home_for_job("claude", 4, data_dir=str(data_dir)) == str(home_b)
 
 
-@pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("provider", ["codex", "claude", "xai"])
 def test_provider_rotation_skips_limited_accounts_until_all_are_limited(monkeypatch, tmp_path, provider):
     monkeypatch.delenv("ENGINE_RUNTIME_CONFIG_PATH", raising=False)
     home_a = tmp_path / provider / "account-a"
     home_b = tmp_path / provider / "account-b"
     home_a.mkdir(parents=True)
     home_b.mkdir(parents=True)
-    if provider == "codex":
+    if provider in {"codex", "xai"}:
         (home_a / "auth.json").write_text("{}", encoding="utf-8")
         (home_b / "auth.json").write_text("{}", encoding="utf-8")
-    setting = "ENGINE_CODEX_HOME" if provider == "codex" else "ENGINE_CLAUDE_HOME"
+    setting = {
+        "codex": "ENGINE_CODEX_HOME",
+        "claude": "ENGINE_CLAUDE_HOME",
+        "xai": "ENGINE_GROK_HOME",
+    }[provider]
     monkeypatch.setenv(setting, f"{home_a},{home_b}")
 
     first = provider_home_for_job(provider, 1)
