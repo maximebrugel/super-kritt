@@ -38,11 +38,16 @@ export const PROVIDER_DEFINITIONS = {
     description: 'OpenRouter-compatible models through a project API key.',
     management: 'api_key',
   },
+  xai: {
+    label: 'xAI',
+    envKeys: ['XAI_API_KEY'],
+    credentialLabel: 'xAI API key',
+    description: 'Grok Build through an xAI device login or API key.',
+    management: 'login',
+  },
 };
 
-const MANAGED_CREDENTIAL_PROVIDERS = new Set(
-  Object.keys(PROVIDER_DEFINITIONS).filter((id) => PROVIDER_DEFINITIONS[id].management === 'api_key')
-);
+const MANAGED_CREDENTIAL_PROVIDERS = new Set(['kimi', 'openrouter', 'xai']);
 
 const MAX_CREDENTIAL_LENGTH = 16 * 1024;
 let writeQueue = Promise.resolve();
@@ -116,7 +121,7 @@ function queuedWrite(operation) {
 
 export function validateProviderCredential(provider, credential) {
   if (!MANAGED_CREDENTIAL_PROVIDERS.has(provider)) {
-    return { field: 'provider', message: 'Only API-key providers accept a key in Accounts.' };
+    return { field: 'provider', message: 'This provider does not use a managed API key in Accounts.' };
   }
   if (typeof credential !== 'string' || !credential.trim()) {
     return { field: 'credential', message: 'Enter an API key.' };
@@ -225,7 +230,9 @@ export function providerCredentialStatuses({
       configured,
       source,
       canManage: definition.management === 'login' || definition.management === 'api_key',
-      canRemove: definition.management === 'api_key' && (managedCredential || environmentCredential),
+      // xAI keeps OpenRouter-style managed API keys alongside device login.
+      canManageKey: MANAGED_CREDENTIAL_PROVIDERS.has(id),
+      canRemove: MANAGED_CREDENTIAL_PROVIDERS.has(id) && (managedCredential || environmentCredential),
       managed: managedCredential,
     };
   });

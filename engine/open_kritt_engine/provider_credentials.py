@@ -9,6 +9,7 @@ DEFAULT_PROVIDER_CREDENTIALS_PATH = "/credentials/providers.json"
 PROVIDER_ENV_KEYS = {
     "kimi": "KIMI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "xai": "XAI_API_KEY",
 }
 MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024
 _CREDENTIAL_WRITE_LOCK = threading.Lock()
@@ -39,9 +40,11 @@ JOB_PROVIDER_ENV_KEYS = {
     "claude": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}),
     "kimi": frozenset({"KIMI_API_KEY"}),
     "openrouter": frozenset({"OPENROUTER_API_KEY"}),
+    "xai": frozenset({"XAI_API_KEY"}),
 }
 JOB_HARNESS_ENV_KEYS = {
     "cursor": frozenset({"CURSOR_API_KEY", "CURSOR_AUTH_TOKEN", "CURSOR_AGENT_BIN"}),
+    "grok-build": frozenset({"GROK_BIN", "GROK_HOME"}),
 }
 
 

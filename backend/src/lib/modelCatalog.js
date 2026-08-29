@@ -42,9 +42,21 @@ const CLAUDE_CODE_MODELS = [
   },
 ];
 
-// Bounded list of the Kimi plan coding models (api.kimi.com/coding/v1/models),
-// maintained here like the Claude subscription list. They are thinking-only
-// models without an effort selector.
+const XAI_GROK_MODELS = [
+  {
+    id: 'grok-4.6',
+    label: 'Grok 4.6',
+    thinkingEfforts: ['low', 'medium', 'high', 'xhigh'],
+    isDefault: true,
+  },
+  {
+    id: 'grok-4.5',
+    label: 'Grok 4.5',
+    thinkingEfforts: ['low', 'medium', 'high'],
+    isDefault: false,
+  },
+];
+
 const KIMI_MODELS = [
   { id: 'k3', label: 'K3', thinkingEfforts: ['default'], isDefault: true },
   { id: 'k3-256k', label: 'K3 256k', thinkingEfforts: ['default'], isDefault: false },
@@ -129,13 +141,31 @@ export function modelCatalogEntry(provider, catalog) {
     };
   }
 
+  // Device login authenticates Grok Build but cannot call xAI's API-key-only
+  // /v1/models endpoint. Keep the current default so the picker is usable.
+  if (provider === 'xai' && (!models.length || !defaultModel)) {
+    return {
+      provider,
+      input: 'text',
+      models: XAI_GROK_MODELS,
+      defaultModel: 'grok-4.6',
+      status: 'ready',
+    };
+  }
+
   const lastError = catalogValue(catalog, 'lastError', 'last_error');
   const defaultIsMissing = !configuredDefault || !defaultModel;
   // A failed refresh must not erase a previously valid bounded catalog. Without
   // one, catalog-backed suggestions remain unavailable; OpenRouter still accepts
   // explicit model IDs through its text input and selection validation policy.
   const status = models.length > 0 && !defaultIsMissing ? 'ready' : hasText(lastError) ? 'unavailable' : 'loading';
-  return { provider, input: provider === 'openrouter' ? 'text' : 'select', models, defaultModel, status };
+  return {
+    provider,
+    input: provider === 'openrouter' || provider === 'xai' ? 'text' : 'select',
+    models,
+    defaultModel,
+    status,
+  };
 }
 
 export function buildModelCatalogResponse(configuredProviders, catalogs = []) {

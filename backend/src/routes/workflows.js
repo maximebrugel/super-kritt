@@ -30,14 +30,15 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// The step rows a validated workflow persists, in creation order.
 export function workflowStepRows(valid) {
   return valid.levels.flatMap((level) => {
     const isLast = level.depth === valid.maxDepth;
-    const outputFormatText = JSON.stringify(level.outputFormat);
+    const outputFormat = JSON.stringify(level.outputFormat);
     return level.steps.map((step) => ({
+      clientId: step.clientId,
+      boundSourceStepId: step.boundSourceStepId,
       content: step.content,
-      outputFormat: outputFormatText,
+      outputFormat,
       name: step.name?.trim() || null,
       depth: level.depth,
       multiOutput: level.multiOutput,
@@ -48,33 +49,43 @@ export function workflowStepRows(valid) {
   });
 }
 
-// True when `valid` would recreate exactly the steps the workflow already has,
-// i.e. only name/description changed and nothing needs rebuilding.
 export function stepsMatch(existingSteps, valid) {
   const rows = workflowStepRows(valid);
   if (existingSteps.length !== rows.length) return false;
-  return rows.every((row, i) => {
-    const step = existingSteps[i];
-    return !!step && Object.keys(row).every((key) => step[key] === row[key]);
+  const createdByClientId = new Map(rows.map((row, index) => [row.clientId, existingSteps[index]?.id]));
+  return rows.every(({ clientId: _clientId, boundSourceStepId, ...row }, index) => {
+    const step = existingSteps[index];
+    const expectedBoundSourceStepId = boundSourceStepId ? createdByClientId.get(boundSourceStepId) : null;
+    return (
+      !!step &&
+      step.boundSourceStepId === expectedBoundSourceStepId &&
+      Object.keys(row).every((key) => step[key] === row[key])
+    );
   });
 }
 
 // Persist a validated workflow (steps first, then the workflow row).
 async function createWorkflowSteps(tx, valid) {
   const stepIds = [];
-  for (const data of workflowStepRows(valid)) {
-    const created = await tx.step.create({ data });
+  const createdByClientId = new Map();
+  for (const { clientId, boundSourceStepId, ...data } of workflowStepRows(valid)) {
+    const created = await tx.step.create({
+      data: {
+        ...data,
+        boundSourceStepId: boundSourceStepId ? createdByClientId.get(boundSourceStepId) : null,
+      },
+    });
     stepIds.push(created.id);
+    createdByClientId.set(clientId, created.id);
   }
   return stepIds;
 }
 
-// Existing steps in stepIds order (findMany does not preserve it).
 async function orderedSteps(tx, stepIds) {
   const ids = stepIds || [];
   if (ids.length === 0) return [];
   const steps = await tx.step.findMany({ where: { id: { in: ids } } });
-  const byId = new Map(steps.map((s) => [s.id.toString(), s]));
+  const byId = new Map(steps.map((step) => [step.id.toString(), step]));
   return ids.map((id) => byId.get(id.toString())).filter(Boolean);
 }
 
@@ -87,15 +98,20 @@ async function persistWorkflow(valid) {
   });
 }
 
+export function workflowInUseResponse(scanCount) {
+  return {
+    error: `Cannot edit: ${scanCount} scan(s) use this workflow. Duplicate it to make changes safely.`,
+    code: 'workflow_in_use',
+    scanCount,
+  };
+}
+
 export async function replaceWorkflowIfUnused(tx, id, valid) {
   await lockWorkflowForEdit(tx, id);
   const existing = await tx.workflow.findUnique({ where: { id } });
   if (!existing) return { kind: 'not-found' };
   const scanCount = await tx.scan.count({ where: { workflowId: id } });
   if (scanCount > 0) {
-    // Past scan results point at these step rows, so the step tree can't be
-    // rebuilt once the workflow has run — but renaming or re-describing it is
-    // always safe, so let a metadata-only edit through.
     if (!stepsMatch(await orderedSteps(tx, existing.stepIds), valid)) return { kind: 'in-use', scanCount };
     const workflow = await tx.workflow.update({
       where: { id },
@@ -151,9 +167,7 @@ router.put('/:id', async (req, res, next) => {
     const result = await prisma.$transaction((tx) => replaceWorkflowIfUnused(tx, id, valid));
     if (result.kind === 'not-found') return res.status(404).json({ error: 'Workflow not found.' });
     if (result.kind === 'in-use') {
-      return res.status(409).json({
-        error: `Cannot edit: ${result.scanCount} scan(s) use this workflow. Duplicate it to make changes safely.`,
-      });
+      return res.status(409).json(workflowInUseResponse(result.scanCount));
     }
 
     res.json(await assembleWorkflow(result.workflow));

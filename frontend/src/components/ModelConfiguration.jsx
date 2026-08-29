@@ -22,6 +22,7 @@ const PROVIDER_LABELS = {
   claude: 'Claude',
   kimi: 'Kimi',
   openrouter: 'OpenRouter',
+  xai: 'xAI',
 };
 
 export function modelConfigurationForCatalog(current, providers, catalog) {

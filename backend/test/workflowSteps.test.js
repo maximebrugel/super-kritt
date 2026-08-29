@@ -63,3 +63,34 @@ test('a missing step row never counts as a match', () => {
 
   assert.equal(stepsMatch(existing, validateWorkflow(payload())), false);
 });
+
+test('bound steps compare their persisted source ids', () => {
+  const valid = {
+    maxDepth: 1,
+    levels: [
+      {
+        depth: 0,
+        multiOutput: true,
+        consumesAll: false,
+        outputFormat: { candidate: 'string' },
+        steps: [{ clientId: 'source', name: 'scan', content: 'Scan', boundSourceStepId: null }],
+      },
+      {
+        depth: 1,
+        multiOutput: false,
+        consumesAll: false,
+        outputFormat: terminalFormat,
+        steps: [{ clientId: 'report', name: 'report', content: 'Report', boundSourceStepId: 'source' }],
+      },
+    ],
+  };
+  const existing = workflowStepRows(valid).map((row, index) => ({
+    ...row,
+    id: BigInt(index + 10),
+    boundSourceStepId: index ? 10n : null,
+  }));
+
+  assert.equal(stepsMatch(existing, valid), true);
+  existing[1].boundSourceStepId = 99n;
+  assert.equal(stepsMatch(existing, valid), false);
+});

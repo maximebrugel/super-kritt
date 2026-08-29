@@ -71,25 +71,28 @@ export const SCAN_STATUSES = [
 export const THINKING_EFFORTS = ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const DEFAULT_THINKING_EFFORT = 'medium';
 
-export const MODEL_PROVIDERS = ['codex', 'claude', 'kimi', 'openrouter'];
+export const MODEL_PROVIDERS = ['codex', 'claude', 'kimi', 'openrouter', 'xai'];
 export const DEFAULT_MODEL_PROVIDER = 'openrouter';
 
-export const HARNESSES = ['codex', 'claude-code', 'cursor', 'kimi-code'];
+export const HARNESSES = ['codex', 'claude-code', 'cursor', 'kimi-code', 'grok-build'];
 export const HARNESS_ALIASES = {
   'codex-cli': 'codex',
   'cursor-agent': 'cursor',
   'cursor-cli': 'cursor',
+  grok: 'grok-build',
 };
 export const MODEL_PROVIDER_HARNESSES = {
   codex: ['codex'],
   claude: ['claude-code'],
   kimi: ['claude-code', 'kimi-code'],
   openrouter: ['codex', 'claude-code'],
+  xai: ['grok-build'],
 };
 export const HARNESS_THINKING_EFFORTS = {
   codex: ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   'claude-code': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
   'kimi-code': ['default'],
+  'grok-build': ['low', 'medium', 'high', 'xhigh'],
 };
 
 export const GENERATION_KINDS = ['workflow', 'post_script'];
